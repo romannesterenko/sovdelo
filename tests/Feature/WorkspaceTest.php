@@ -471,4 +471,54 @@ class WorkspaceTest extends TestCase {
   $this->account();for($i=0;$i<6;$i++)$this->postJson('/login',['email'=>'one@example.com','password'=>'wrong'])->assertUnprocessable();
   $this->postJson('/login',['email'=>'one@example.com','password'=>'wrong'])->assertStatus(429);
  }
+ private function transferDocument():array {return ['format'=>'sovdelo.transfer','schema_version'=>1,'exported_at'=>'2026-11-11T12:00:00+00:00','projects'=>[],'tasks'=>[]];}
+ private function transferTask(string $title='Из файла'):array {return ['uuid'=>(string)\Illuminate\Support\Str::uuid(),'project_uuid'=>null,'title'=>$title,'description'=>null,'status'=>'todo','priority'=>'normal','due_date'=>null,'planned_date'=>null,'archived_at'=>null,'deleted_at'=>null,'checklist'=>[],'labels'=>[],'comments'=>[],'time'=>[]];}
+ private function transferRequest(array $document,string $strategy='skip',?string $key=null):array {$payload=json_encode($document,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR);return ['payload'=>$payload,'strategy'=>$strategy,'fingerprint'=>hash('sha256',$payload),'request_key'=>$key??(string)\Illuminate\Support\Str::uuid()];}
+ public function test_transfer_export_is_scoped_and_contains_archive_trash_without_credentials():void {
+  $a=$this->account();$b=$this->account('export@example.com');$p=Project::create(['user_id'=>$a->id,'name'=>'Мой проект']);$p->archived_at=now();$p->save();$t=Task::create(['user_id'=>$a->id,'project_id'=>$p->id,'title'=>'Корзина']);$t->delete();Task::create(['user_id'=>$b->id,'title'=>'Чужая']);
+  $d=$this->actingAs($a)->getJson('/transfer/export')->assertOk()->assertJsonPath('format','sovdelo.transfer')->assertJsonPath('schema_version',1)->assertJsonCount(1,'projects')->assertJsonCount(1,'tasks')->json();
+  $this->assertNotNull($d['tasks'][0]['deleted_at']);$this->assertNotNull($d['projects'][0]['archived_at']);$this->assertArrayNotHasKey('user_id',$d['tasks'][0]);$this->assertArrayNotHasKey('id',$d['tasks'][0]);$this->assertStringNotContainsString('password',json_encode($d));
+ }
+ public function test_transfer_round_trip_preserves_content_labels_comments_and_time():void {
+  $a=$this->account();$b=$this->account('import@example.com');$p=Project::create(['user_id'=>$a->id,'name'=>'Дом']);$t=Task::create(['user_id'=>$a->id,'project_id'=>$p->id,'title'=>'Уборка','description'=>'Комната','planned_date'=>'2026-11-12','checklist'=>[['text'=>'Пол','done'=>true]]]);$label=\App\Models\Label::create(['user_id'=>$a->id,'name'=>'Дом','color'=>'green']);$t->labels()->attach($label);\App\Models\TaskComment::create(['user_id'=>$a->id,'task_id'=>$t->id,'body'=>'Комментарий']);
+  \App\Models\TimeSession::create(['user_id'=>$a->id,'task_id'=>$t->id,'request_key'=>(string)\Illuminate\Support\Str::uuid(),'started_at'=>'2026-11-11 12:00:00','ended_at'=>'2026-11-11 12:05:00','duration_seconds'=>300,'end_reason'=>'stop']);
+  $d=$this->actingAs($a)->getJson('/transfer/export')->assertOk()->json();$r=$this->transferRequest($d);$this->actingAs($b)->postJson('/transfer/preview',$r)->assertOk()->assertJsonPath('summary.create_tasks',1);$this->postJson('/transfer/import',$r)->assertOk()->assertJsonPath('created_tasks',1);
+  $copy=Task::where('user_id',$b->id)->firstOrFail();$this->assertTrue($copy->checklist[0]['done']);$this->assertSame('Дом',$copy->labels->first()->name);$this->assertSame('Комментарий',$copy->comments->first()->body);$this->assertSame($b->id,$copy->comments->first()->user_id);$this->assertSame('Дом',$copy->project->name);$this->assertDatabaseHas('time_sessions',['user_id'=>$b->id,'task_id'=>$copy->id,'duration_seconds'=>300,'end_reason'=>'import']);$this->assertSame('Уборка',$t->fresh()->title);
+ }
+ public function test_transfer_skip_uses_identity_even_in_trash_and_copy_keeps_original():void {
+  $u=$this->account();$t=Task::create(['user_id'=>$u->id,'title'=>'Оригинал']);$t->delete();$d=$this->actingAs($u)->getJson('/transfer/export')->assertOk()->json();$d['tasks'][0]['title']='Изменённый файл';
+  $r=$this->transferRequest($d);$this->postJson('/transfer/preview',$r)->assertJsonPath('summary.duplicate_tasks',1)->assertJsonPath('summary.create_tasks',0);$this->postJson('/transfer/import',$r)->assertOk()->assertJsonPath('skipped_tasks',1);$this->assertSame('Оригинал',Task::withTrashed()->findOrFail($t->id)->title);
+  $this->postJson('/transfer/import',$this->transferRequest($d,'copy'))->assertOk()->assertJsonPath('created_tasks',1);$this->assertDatabaseCount('tasks',2);$this->assertSame(2,Task::withTrashed()->where('user_id',$u->id)->distinct()->count('transfer_uuid'));
+ }
+ public function test_transfer_preview_has_no_side_effects_and_rejects_invalid_schema():void {
+  $this->actingAs($this->account());$d=$this->transferDocument();$d['tasks'][]=$this->transferTask();$this->postJson('/transfer/preview',$this->transferRequest($d))->assertOk();$this->assertDatabaseCount('tasks',0);$this->assertDatabaseCount('projects',0);$this->assertDatabaseCount('import_batches',0);
+  $d['schema_version']=99;$this->postJson('/transfer/preview',$this->transferRequest($d))->assertUnprocessable();
+ }
+ public function test_transfer_rejects_unknown_project_and_privileged_fields():void {
+  $this->actingAs($this->account());$d=$this->transferDocument();$d['tasks'][]=$this->transferTask();$d['tasks'][0]['project_uuid']=(string)\Illuminate\Support\Str::uuid();$this->postJson('/transfer/import',$this->transferRequest($d))->assertUnprocessable();$this->assertDatabaseCount('tasks',0);
+  $d['tasks'][0]['project_uuid']=null;$d['tasks'][0]['user_id']=123;$this->postJson('/transfer/import',$this->transferRequest($d))->assertUnprocessable();
+ }
+ public function test_transfer_copy_retry_is_idempotent_and_changed_file_requires_preview():void {
+  $this->actingAs($this->account());$d=$this->transferDocument();$d['tasks'][]=$this->transferTask();$r=$this->transferRequest($d,'copy');$this->postJson('/transfer/import',$r)->assertOk();$this->postJson('/transfer/import',$r)->assertOk()->assertJsonPath('created_tasks',1);$this->assertDatabaseCount('tasks',1);$this->assertDatabaseCount('import_batches',1);
+  $r['payload'].=' ';$this->postJson('/transfer/import',$r)->assertUnprocessable();$r['fingerprint']=hash('sha256',$r['payload']);$this->postJson('/transfer/import',$r)->assertUnprocessable();$this->assertDatabaseCount('tasks',1);
+ }
+ public function test_transfer_import_rolls_back_all_rows_on_runtime_failure():void {
+  $this->actingAs($this->account());$d=$this->transferDocument();$d['projects'][]=['uuid'=>(string)\Illuminate\Support\Str::uuid(),'name'=>'Не должен сохраниться','archived_at'=>null];$d['tasks'][]=$this->transferTask('Первая');$d['tasks'][]=$this->transferTask('Сбой импорта');
+  \Illuminate\Support\Facades\Event::listen('eloquent.creating: '.Task::class,function($task){if($task->title==='Сбой импорта')throw new \RuntimeException('transfer-test-failure');});
+  $this->withoutExceptionHandling();try{$this->postJson('/transfer/import',$this->transferRequest($d));$this->fail('Ожидалась ошибка записи');}catch(\RuntimeException $e){$this->assertSame('transfer-test-failure',$e->getMessage());}
+  $this->assertDatabaseCount('tasks',0);$this->assertDatabaseCount('projects',0);$this->assertDatabaseCount('import_batches',0);
+ }
+ public function test_transfer_active_time_is_snapshot_and_import_does_not_start_timer():void {
+  $a=$this->account();$b=$this->account('timer-import@example.com');$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$t=Task::create(['user_id'=>$a->id,'title'=>'Таймер']);$this->actingAs($a)->postJson('/tasks/'.$t->id.'/timer',['request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertOk();$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:01:30','UTC'));
+  $d=$this->getJson('/transfer/export')->assertOk()->json();$this->assertSame(90,$d['tasks'][0]['time'][0]['seconds']);$this->assertDatabaseHas('time_sessions',['user_id'=>$a->id,'ended_at'=>null]);
+  $this->actingAs($b)->postJson('/transfer/import',$this->transferRequest($d))->assertOk();$this->assertSame(0,\App\Models\TimeSession::where('user_id',$b->id)->whereNull('ended_at')->count());$this->assertDatabaseHas('time_sessions',['user_id'=>$b->id,'duration_seconds'=>90]);
+ }
+ public function test_transfer_guests_malformed_json_and_oversized_files_are_rejected():void {
+  $this->getJson('/transfer/export')->assertUnauthorized();$this->postJson('/transfer/preview',[])->assertUnauthorized();$this->postJson('/transfer/import',[])->assertUnauthorized();$this->actingAs($this->account());
+  $this->postJson('/transfer/preview',['payload'=>'{bad','strategy'=>'skip'])->assertUnprocessable();$this->postJson('/transfer/preview',['payload'=>str_repeat('x',5*1024*1024+1),'strategy'=>'skip'])->assertUnprocessable();
+ }
+ public function test_transfer_duplicate_uuid_and_invalid_time_are_rejected():void {
+  $this->actingAs($this->account());$d=$this->transferDocument();$task=$this->transferTask();$d['tasks']=[$task,$task];$d['tasks'][1]['uuid']=strtoupper($task['uuid']);$this->postJson('/transfer/preview',$this->transferRequest($d))->assertUnprocessable();
+  $d['tasks']=[$task];$d['tasks'][0]['time'][]=['started_at'=>'2026-11-11T12:00:00+00:00','ended_at'=>'2026-11-11T11:00:00+00:00','seconds'=>60,'end_reason'=>'stop','adjustments'=>[]];$this->postJson('/transfer/preview',$this->transferRequest($d))->assertUnprocessable();
+ }
 }

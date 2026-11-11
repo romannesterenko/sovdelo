@@ -25,6 +25,9 @@ Route::post('/login',function(Request $r){
 })->middleware('throttle:6,1');
 Route::post('/logout',function(Request $r){Auth::logout();$r->session()->invalidate();$r->session()->regenerateToken();return ['csrf'=>csrf_token()];})->middleware('auth');
 Route::middleware(['auth',\App\Http\Middleware\EnsureAccountSession::class])->group(function(){
+ Route::get('/transfer/export',[\App\Http\Controllers\DataTransferController::class,'export'])->middleware('throttle:6,1');
+ Route::post('/transfer/preview',[\App\Http\Controllers\DataTransferController::class,'preview'])->middleware('throttle:10,1');
+ Route::post('/transfer/import',[\App\Http\Controllers\DataTransferController::class,'import'])->middleware('throttle:6,1');
  Route::get('/account',[\App\Http\Controllers\AccountController::class,'profile']);
  Route::patch('/account',[\App\Http\Controllers\AccountController::class,'update']);
  Route::put('/account/password',[\App\Http\Controllers\AccountController::class,'password'])->middleware('throttle:6,1');
