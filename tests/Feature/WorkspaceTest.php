@@ -296,4 +296,59 @@ class WorkspaceTest extends TestCase {
   $u=$this->account();$p=Project::create(['user_id'=>$u->id,'name'=>'Time project']);$t=$this->boardTask($u,'Time','todo',1024,$p->id);$this->actingAs($u);$this->timerStart($t)->assertOk();
   $this->postJson('/projects/'.$p->id.'/archive')->assertOk();$this->getJson('/timer')->assertJsonPath('active',null);
  }
+ public function test_series_generates_independent_task_once_and_resets_checklist():void {
+  $u=$this->account();$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$this->actingAs($u);
+  $t=Task::create(['user_id'=>$u->id,'title'=>'Полить цветы','description'=>'Окно','planned_date'=>'2026-11-11','due_date'=>'2026-11-12','checklist'=>[['text'=>'Кухня','done'=>true]]]);
+  $label=\App\Models\Label::create(['user_id'=>$u->id,'name'=>'Дом','color'=>'green']);$t->labels()->attach($label);
+  $this->postJson('/task-series',['task_id'=>$t->id,'frequency'=>'daily','next_date'=>'2026-11-11','request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertCreated();
+  $this->getJson('/data')->assertOk()->assertJsonCount(2,'tasks');$this->getJson('/data')->assertJsonCount(2,'tasks');
+  $copy=Task::whereNotNull('task_series_id')->firstOrFail();$this->assertSame('2026-11-11',$copy->planned_date);$this->assertNull($copy->due_date);$this->assertFalse($copy->checklist[0]['done']);$this->assertSame($label->id,$copy->labels->first()->id);
+  $this->patchJson('/tasks/'.$copy->id,['title'=>'Один экземпляр','status'=>'done'])->assertOk();
+  $this->assertDatabaseHas('task_series',['title'=>'Полить цветы','next_date'=>'2026-11-12']);$this->assertSame('Полить цветы',$t->fresh()->title);
+ }
+ public function test_series_skips_missed_occurrences_and_uses_account_timezone():void {
+  $u=$this->account();$u->timezone='Asia/Vladivostok';$u->save();$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-01 12:00:00','UTC'));$this->actingAs($u);
+  $t=Task::create(['user_id'=>$u->id,'title'=>'Утро']);
+  $this->postJson('/task-series',['task_id'=>$t->id,'frequency'=>'daily','next_date'=>'2026-11-02','request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertCreated();
+  $this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-10 18:00:00','UTC'));
+  $this->artisan('sovdelo:recurring')->assertSuccessful();$this->artisan('sovdelo:recurring')->assertSuccessful();
+  $this->assertDatabaseCount('tasks',2);$this->assertDatabaseHas('tasks',['occurrence_date'=>'2026-11-11']);$this->assertDatabaseHas('task_series',['next_date'=>'2026-11-12']);
+ }
+ public function test_monthly_schedule_preserves_day_after_short_month_and_leap_year():void {
+  $s=app(\App\Services\RecurringTasks::class);
+  $this->assertSame('2027-02-28',$s->advance('2027-01-31','monthly',31));$this->assertSame('2027-03-31',$s->advance('2027-02-28','monthly',31));
+  $this->assertSame('2028-02-29',$s->advance('2028-01-31','monthly',31));$this->assertSame('2026-11-18',$s->advance('2026-11-11','weekly',11));
+ }
+ public function test_series_pause_resume_and_future_edit_preserve_existing_tasks():void {
+  $u=$this->account();$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$this->actingAs($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Исходная']);
+  $id=$this->postJson('/task-series',['task_id'=>$t->id,'frequency'=>'weekly','next_date'=>'2026-11-11','request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertCreated()->json('id');
+  $this->patchJson('/task-series/'.$id,['active'=>false])->assertOk();$this->getJson('/data')->assertJsonCount(1,'tasks');
+  $this->patchJson('/task-series/'.$id,['title'=>'Новая серия','active'=>true])->assertOk();$this->getJson('/data')->assertJsonCount(2,'tasks');
+  $this->assertDatabaseHas('tasks',['id'=>$t->id,'title'=>'Исходная']);$this->assertDatabaseHas('tasks',['title'=>'Новая серия']);
+  $this->patchJson('/task-series/'.$id,['title'=>'Ещё новее'])->assertOk();$this->assertDatabaseHas('tasks',['title'=>'Новая серия']);
+ }
+ public function test_series_accounts_are_isolated_and_schedule_validated():void {
+  $a=$this->account();$b=$this->account('second@example.com');$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$t=Task::create(['user_id'=>$a->id,'title'=>'Личная']);
+  $d=['task_id'=>$t->id,'frequency'=>'daily','next_date'=>'2026-11-12','request_key'=>(string)\Illuminate\Support\Str::uuid()];
+  $id=$this->actingAs($a)->postJson('/task-series',$d)->assertCreated()->json('id');
+  $this->actingAs($b)->getJson('/task-series')->assertJsonCount(0);$this->postJson('/task-series',$d)->assertNotFound();$this->patchJson('/task-series/'.$id,['active'=>false])->assertNotFound();
+  $this->actingAs($a)->patchJson('/task-series/'.$id,['frequency'=>'hourly','next_date'=>'2026-11-10'])->assertUnprocessable();
+ }
+ public function test_archived_project_pauses_series_without_deleting_schedule():void {
+  $u=$this->account();$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$this->actingAs($u);$p=Project::create(['user_id'=>$u->id,'name'=>'Проект']);$t=Task::create(['user_id'=>$u->id,'project_id'=>$p->id,'title'=>'Повтор']);
+  $this->postJson('/task-series',['task_id'=>$t->id,'frequency'=>'daily','next_date'=>'2026-11-11','request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertCreated();
+  $this->postJson('/projects/'.$p->id.'/archive')->assertOk();$this->getJson('/data')->assertJsonCount(0,'tasks');$this->assertDatabaseCount('tasks',1);
+  $this->postJson('/projects/'.$p->id.'/restore')->assertOk();$this->getJson('/data')->assertJsonCount(2,'tasks');
+ }
+ public function test_retry_series_creation_does_not_duplicate_template():void {
+  $u=$this->account();$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$this->actingAs($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Серия']);
+  $d=['task_id'=>$t->id,'frequency'=>'daily','next_date'=>'2026-11-12','request_key'=>(string)\Illuminate\Support\Str::uuid()];
+  $id=$this->postJson('/task-series',$d)->assertCreated()->json('id');$this->postJson('/task-series',$d)->assertCreated()->assertJsonPath('id',$id);$this->assertDatabaseCount('task_series',1);
+ }
+ public function test_trashed_occurrence_is_not_regenerated():void {
+  $u=$this->account();$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$this->actingAs($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Серия']);
+  $id=$this->postJson('/task-series',['task_id'=>$t->id,'frequency'=>'daily','next_date'=>'2026-11-11','request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertCreated()->json('id');
+  $this->getJson('/data')->assertOk();$copy=Task::whereNotNull('task_series_id')->firstOrFail();$this->deleteJson('/tasks/'.$copy->id)->assertNoContent();
+  $this->patchJson('/task-series/'.$id,['frequency'=>'daily','next_date'=>'2026-11-11'])->assertOk();$this->getJson('/data')->assertJsonCount(1,'tasks');$this->assertDatabaseCount('tasks',2);
+ }
 }

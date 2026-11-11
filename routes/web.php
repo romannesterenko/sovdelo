@@ -25,6 +25,10 @@ Route::post('/login',function(Request $r){
 })->middleware('throttle:6,1');
 Route::post('/logout',function(Request $r){Auth::logout();$r->session()->invalidate();$r->session()->regenerateToken();return ['csrf'=>csrf_token()];})->middleware('auth');
 Route::middleware('auth')->group(function(){
+ Route::get('/task-series',[\App\Http\Controllers\TaskSeriesController::class,'index']);
+ Route::post('/task-series',[\App\Http\Controllers\TaskSeriesController::class,'store']);
+ Route::patch('/task-series/{series}',[\App\Http\Controllers\TaskSeriesController::class,'update']);
+
  Route::get('/timer',fn(Request $r)=>app(TaskTimer::class)->snapshot($r->user()->id));
  Route::post('/tasks/{task}/timer',function(Request $r,int $task){$d=$r->validate(['request_key'=>'required|uuid']);return app(TaskTimer::class)->start($r->user()->id,$task,$d['request_key']);});
  Route::post('/timer/{session}/stop',function(Request $r,int $session){$d=$r->validate(['reason'=>['required',Rule::in(['pause','stop'])]]);return app(TaskTimer::class)->stop($r->user()->id,$session,$d['reason']);});
@@ -50,7 +54,7 @@ Route::middleware('auth')->group(function(){
  Route::get('/tasks/{task}/attachments/{attachment}',[TaskDetailsController::class,'download']);
  Route::delete('/tasks/{task}/attachments/{attachment}',[TaskDetailsController::class,'deleteFile']);
 
- Route::get('/data',fn(Request $r)=>['projects'=>Project::where('user_id',$r->user()->id)->whereNull('archived_at')->orderBy('id')->get(),'tasks'=>Task::where('user_id',$r->user()->id)->activeBoard()->orderBy('sort_order')->orderBy('id')->get()]);
+ Route::get('/data',function(Request $r){app(\App\Services\RecurringTasks::class)->generate($r->user()->id);return ['projects'=>Project::where('user_id',$r->user()->id)->whereNull('archived_at')->orderBy('id')->get(),'tasks'=>Task::where('user_id',$r->user()->id)->activeBoard()->orderBy('sort_order')->orderBy('id')->get()];});
  Route::post('/projects',function(Request $r){$d=$r->validate(['name'=>'required|string|max:120']);return Project::create($d+['user_id'=>$r->user()->id]);});
  Route::post('/tasks',function(Request $r){
   $d=$r->validate(['title'=>'required|string|max:240','project_id'=>['nullable',Rule::exists('projects','id')->where('user_id',$r->user()->id)->whereNull('archived_at')],'due_date'=>'nullable|date_format:Y-m-d','planned_date'=>'nullable|date_format:Y-m-d']);
