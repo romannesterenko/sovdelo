@@ -1,0 +1,15 @@
+[Unit]
+Description=SovDelo Laravel scheduler
+After=network.target postgresql.service
+[Service]
+Type=simple
+User=sovdelo
+Group=sovdelo
+WorkingDirectory=/var/www/sovdelo/current
+ExecStart=/usr/bin/php artisan schedule:work
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+UMask=0027
+[Install]
+WantedBy=multi-user.target

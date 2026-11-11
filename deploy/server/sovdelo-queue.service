@@ -1,0 +1,15 @@
+[Unit]
+Description=SovDelo Laravel queue
+After=network.target postgresql.service
+[Service]
+Type=simple
+User=sovdelo
+Group=sovdelo
+WorkingDirectory=/var/www/sovdelo/current
+ExecStart=/usr/bin/php artisan queue:work database --sleep=3 --tries=3 --timeout=90 --memory=128
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+UMask=0027
+[Install]
+WantedBy=multi-user.target
