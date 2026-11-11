@@ -239,4 +239,61 @@ class WorkspaceTest extends TestCase {
   $this->assertDatabaseHas('users',['id'=>$a->id,'timezone'=>'Asia/Vladivostok']);$this->assertDatabaseHas('users',['id'=>$b->id,'timezone'=>'Europe/Moscow']);
   $this->patchJson('/preferences',['timezone'=>'Invalid/Zone'])->assertUnprocessable();
  }
+
+ private function timerStart(Task $t,?string $key=null){return $this->postJson('/tasks/'.$t->id.'/timer',['request_key'=>$key??(string)\Illuminate\Support\Str::uuid()]);}
+ public function test_timer_start_pause_resume_and_elapsed_time():void {
+  $this->travelTo(\Carbon\Carbon::parse('2026-11-11 12:00:00','UTC'));$u=$this->account();$t=$this->boardTask($u,'Time');$this->actingAs($u);
+  $id=$this->timerStart($t)->assertOk()->assertJsonPath('active.task_id',$t->id)->json('active.id');
+  $this->travel(90)->seconds();$this->getJson('/timer')->assertJsonPath('active.elapsed_seconds',90);
+  $this->postJson('/timer/'.$id.'/stop',['reason'=>'pause'])->assertOk()->assertJsonPath('paused.task_id',$t->id)->assertJsonPath('paused.task_seconds',90);
+  $this->timerStart($t)->assertOk();$this->travel(30)->seconds();
+  $this->getJson('/tasks/'.$t->id.'/time')->assertOk()->assertJsonPath('total_seconds',120);
+ }
+ public function test_starting_another_task_closes_the_previous_timer():void {
+  $u=$this->account();$a=$this->boardTask($u,'A');$b=$this->boardTask($u,'B');$this->actingAs($u);
+  $id=$this->timerStart($a)->assertOk()->json('active.id');$this->travel(10)->seconds();$this->timerStart($b)->assertOk()->assertJsonPath('active.task_id',$b->id);
+  $this->assertDatabaseHas('time_sessions',['id'=>$id,'end_reason'=>'switch']);
+  $this->assertSame(1,\App\Models\TimeSession::whereNull('ended_at')->count());
+ }
+ public function test_timer_start_retries_do_not_restart_old_task():void {
+  $u=$this->account();$a=$this->boardTask($u,'A');$b=$this->boardTask($u,'B');$this->actingAs($u);$key=(string)\Illuminate\Support\Str::uuid();
+  $this->timerStart($a,$key)->assertOk();$this->timerStart($a,$key)->assertOk();
+  $this->timerStart($b)->assertOk();$this->timerStart($a,$key)->assertOk()->assertJsonPath('active.task_id',$b->id);
+  $this->assertDatabaseCount('time_sessions',2);
+ }
+ public function test_timer_cannot_access_another_account():void {
+  $a=$this->account();$b=$this->account('two@example.com');$t=$this->boardTask($a,'Private');$this->actingAs($a);$id=$this->timerStart($t)->json('active.id');
+  $this->actingAs($b);$this->timerStart($t)->assertNotFound();$this->postJson('/timer/'.$id.'/stop',['reason'=>'pause'])->assertNotFound();
+  $this->getJson('/tasks/'.$t->id.'/time')->assertNotFound();$this->getJson('/timer')->assertJsonPath('active',null);
+ }
+ public function test_timer_adjustments_are_audited_and_active_edit_is_rejected():void {
+  $u=$this->account();$t=$this->boardTask($u,'Audit');$this->actingAs($u);$id=$this->timerStart($t)->json('active.id');
+  $this->patchJson('/timer/'.$id,['seconds'=>60,'reason'=>'Исправление'])->assertUnprocessable();
+  $this->postJson('/timer/'.$id.'/stop',['reason'=>'stop'])->assertOk();
+  $this->patchJson('/timer/'.$id,['seconds'=>120,'reason'=>'Забыл выключить'])->assertOk();
+  $this->assertDatabaseHas('time_adjustments',['time_session_id'=>$id,'new_seconds'=>120,'reason'=>'Забыл выключить']);
+  $this->getJson('/tasks/'.$t->id.'/time')->assertJsonPath('total_seconds',120);
+ }
+ public function test_completing_archiving_and_trashing_stop_timer():void {
+  $u=$this->account();$t=$this->boardTask($u,'Stop');$this->actingAs($u);$this->timerStart($t)->assertOk();
+  $this->patchJson('/tasks/'.$t->id,['status'=>'done'])->assertOk();$this->getJson('/timer')->assertJsonPath('active',null);
+  $this->patchJson('/tasks/'.$t->id,['status'=>'todo'])->assertOk();$this->timerStart($t)->assertOk();
+  $this->postJson('/tasks/'.$t->id.'/archive')->assertOk();$this->getJson('/timer')->assertJsonPath('active',null);
+  $this->postJson('/tasks/'.$t->id.'/restore')->assertOk();$this->timerStart($t)->assertOk();
+  $this->deleteJson('/tasks/'.$t->id)->assertNoContent();$this->getJson('/timer')->assertJsonPath('active',null);
+ }
+ public function test_database_rejects_second_active_session():void {
+  $u=$this->account();$t=$this->boardTask($u,'Unique');$this->actingAs($u);$this->timerStart($t)->assertOk();
+  try{\Illuminate\Support\Facades\DB::transaction(fn()=>\App\Models\TimeSession::create(['user_id'=>$u->id,'task_id'=>$t->id,'request_key'=>(string)\Illuminate\Support\Str::uuid(),'started_at'=>now()]));$this->fail('Second active session was accepted');}
+  catch(\Illuminate\Database\QueryException $e){$this->assertSame('23505',$e->errorInfo[0]);}
+ }
+
+ public function test_stale_stop_does_not_stop_new_active_session():void {
+  $u=$this->account();$a=$this->boardTask($u,'A');$b=$this->boardTask($u,'B');$this->actingAs($u);$old=$this->timerStart($a)->json('active.id');$new=$this->timerStart($b)->json('active.id');
+  $this->postJson('/timer/'.$old.'/stop',['reason'=>'pause'])->assertOk()->assertJsonPath('active.id',$new);
+ }
+ public function test_archiving_project_stops_its_running_task():void {
+  $u=$this->account();$p=Project::create(['user_id'=>$u->id,'name'=>'Time project']);$t=$this->boardTask($u,'Time','todo',1024,$p->id);$this->actingAs($u);$this->timerStart($t)->assertOk();
+  $this->postJson('/projects/'.$p->id.'/archive')->assertOk();$this->getJson('/timer')->assertJsonPath('active',null);
+ }
 }

@@ -1,6 +1,7 @@
 <?php
 use App\Models\{User,Project,Task};
 use App\Services\TaskOrder;
+use App\Services\TaskTimer;
 use App\Http\Controllers\TaskDetailsController;
 use App\Http\Controllers\TaskLifecycleController;
 use Illuminate\Http\Request;
@@ -24,6 +25,12 @@ Route::post('/login',function(Request $r){
 })->middleware('throttle:6,1');
 Route::post('/logout',function(Request $r){Auth::logout();$r->session()->invalidate();$r->session()->regenerateToken();return ['csrf'=>csrf_token()];})->middleware('auth');
 Route::middleware('auth')->group(function(){
+ Route::get('/timer',fn(Request $r)=>app(TaskTimer::class)->snapshot($r->user()->id));
+ Route::post('/tasks/{task}/timer',function(Request $r,int $task){$d=$r->validate(['request_key'=>'required|uuid']);return app(TaskTimer::class)->start($r->user()->id,$task,$d['request_key']);});
+ Route::post('/timer/{session}/stop',function(Request $r,int $session){$d=$r->validate(['reason'=>['required',Rule::in(['pause','stop'])]]);return app(TaskTimer::class)->stop($r->user()->id,$session,$d['reason']);});
+ Route::get('/tasks/{task}/time',fn(Request $r,int $task)=>app(TaskTimer::class)->history($r->user()->id,$task));
+ Route::patch('/timer/{session}',function(Request $r,int $session){$d=$r->validate(['seconds'=>'required|integer|min:0|max:604800','reason'=>'required|string|min:3|max:500']);return app(TaskTimer::class)->adjust($r->user()->id,$session,$d['seconds'],$d['reason']);});
+
  Route::patch('/preferences',function(Request $r){$d=$r->validate(['timezone'=>['required',Rule::in(\DateTimeZone::listIdentifiers())]]);$u=$r->user();$u->timezone=$d['timezone'];$u->save();return ['user'=>$u];});
 
  Route::get('/lifecycle',[TaskLifecycleController::class,'index']);
