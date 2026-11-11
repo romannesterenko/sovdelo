@@ -418,4 +418,57 @@ class WorkspaceTest extends TestCase {
   $this->actingAs($u)->patchJson('/tasks/'.$t->id,['due_date'=>'2026-11-11'])->assertOk();$this->getJson('/notifications')->assertJsonCount(2,'items');
   \Illuminate\Support\Facades\Bus::fake();$this->artisan('sovdelo:reminders --queue')->assertSuccessful();\Illuminate\Support\Facades\Bus::assertDispatched(\App\Jobs\GenerateTaskReminders::class);
  }
+ public function test_account_profile_preferences_are_saved_and_accounts_stay_separate():void {
+  $a=$this->account();$b=$this->account('profile@example.com');$this->actingAs($a);
+  $this->patchJson('/account',['name'=>'  Роман  ','timezone'=>'Asia/Vladivostok','theme'=>'system','email'=>$b->email,'password'=>'hacked-password','auth_version'=>99])->assertOk()->assertJsonPath('user.name','Роман')->assertJsonPath('user.theme','system');
+  $this->assertDatabaseHas('users',['id'=>$a->id,'name'=>'Роман','timezone'=>'Asia/Vladivostok','theme'=>'system','email'=>$a->email,'auth_version'=>0]);$this->assertSame('Тест',$b->fresh()->name);
+  $this->actingAs($a->fresh())->getJson('/account')->assertOk()->assertJsonPath('user.theme','system')->assertJsonMissingPath('user.password')->assertJsonMissingPath('user.auth_version')->assertJsonMissingPath('user.remember_token');
+ }
+ public function test_account_profile_rejects_invalid_values_and_guests():void {
+  $this->getJson('/account')->assertUnauthorized();$this->patchJson('/account',['name'=>'Гость'])->assertUnauthorized();$this->putJson('/account/password',[])->assertUnauthorized();
+  $this->actingAs($this->account());$this->patchJson('/account',['name'=>'   ','timezone'=>'Not/AZone','theme'=>'neon'])->assertUnprocessable();
+ }
+ public function test_wrong_current_password_does_not_change_password_or_revoke_sessions():void {
+  $u=$this->account();$hash=$u->password;$this->actingAs($u);
+  $this->putJson('/account/password',['current_password'=>'wrong','password'=>'new-password-12345','password_confirmation'=>'new-password-12345'])->assertUnprocessable();
+  $this->assertSame($hash,$u->fresh()->password);$this->assertSame(0,$u->fresh()->auth_version);
+ }
+ public function test_password_change_keeps_current_login_rotates_token_and_deletes_other_sessions():void {
+  $u=$this->account();$b=$this->account('other-password@example.com');$this->actingAs($u);$this->getJson('/account')->assertOk();
+  foreach([['old-device',$u->id],['foreign-device',$b->id]] as [$id,$uid])\Illuminate\Support\Facades\DB::table('sessions')->insert(['id'=>$id,'user_id'=>$uid,'payload'=>'','last_activity'=>now()->timestamp]);
+  $oldToken=$u->remember_token;$oldCsrf=session()->token();
+  $this->putJson('/account/password',['current_password'=>'example-password-123','password'=>'new-password-12345','password_confirmation'=>'new-password-12345'])->assertOk()->assertJsonPath('user.email',$u->email)->assertJsonMissingPath('user.password');
+  $fresh=$u->fresh();$this->assertTrue(\Illuminate\Support\Facades\Hash::check('new-password-12345',$fresh->password));$this->assertSame(1,$fresh->auth_version);$this->assertNotSame($oldToken,$fresh->remember_token);$this->assertNotSame($oldCsrf,session()->token());
+  $this->assertDatabaseMissing('sessions',['id'=>'old-device']);$this->assertDatabaseHas('sessions',['id'=>'foreign-device']);$this->getJson('/account')->assertOk();
+ }
+ public function test_password_change_rejects_confirmation_mismatch_and_same_password():void {
+  $this->actingAs($this->account());
+  $this->putJson('/account/password',['current_password'=>'example-password-123','password'=>'new-password-12345','password_confirmation'=>'different-password'])->assertUnprocessable();
+  $this->putJson('/account/password',['current_password'=>'example-password-123','password'=>'example-password-123','password_confirmation'=>'example-password-123'])->assertUnprocessable();
+ }
+ public function test_old_account_version_is_rejected_after_password_change():void {
+  $u=$this->account();$u->auth_version=1;$u->save();$this->actingAs($u)->withSession(['account_auth_version_'.$u->id=>0])->getJson('/data')->assertUnauthorized();$this->assertGuest();
+ }
+ public function test_device_list_is_scoped_and_never_exposes_session_credentials():void {
+  config(['session.driver'=>'database']);$a=$this->account();$b=$this->account('devices@example.com');
+  foreach([['private-session-secret',$a->id],['foreign-session-secret',$b->id]] as [$id,$uid])\Illuminate\Support\Facades\DB::table('sessions')->insert(['id'=>$id,'user_id'=>$uid,'payload'=>'','ip_address'=>'127.0.0.1','user_agent'=>'Test browser','last_activity'=>now()->timestamp]);
+  $d=$this->actingAs($a)->getJson('/account/sessions')->assertOk()->assertJsonPath('supported',true)->json();
+  $agents=array_values(array_filter($d['items'],fn($s)=>$s['agent']==='Test browser'));$this->assertCount(1,$agents);$this->assertSame(64,strlen($agents[0]['id']));$this->assertStringNotContainsString('private-session-secret',json_encode($d));$this->assertStringNotContainsString('foreign-session-secret',json_encode($d));
+ }
+ public function test_selected_device_revocation_requires_password_and_rejects_foreign_sessions():void {
+  config(['session.driver'=>'database']);$a=$this->account();$b=$this->account('revoke@example.com');
+  foreach([['own-device',$a->id],['foreign-device',$b->id]] as [$id,$uid])\Illuminate\Support\Facades\DB::table('sessions')->insert(['id'=>$id,'user_id'=>$uid,'payload'=>'','last_activity'=>now()->timestamp]);
+  $own=hash_hmac('sha256','own-device',(string)config('app.key'));$foreign=hash_hmac('sha256','foreign-device',(string)config('app.key'));$this->actingAs($a);
+  $this->postJson('/account/sessions/'.$own.'/revoke',['current_password'=>'wrong'])->assertUnprocessable();$this->assertDatabaseHas('sessions',['id'=>'own-device']);
+  $this->postJson('/account/sessions/'.$foreign.'/revoke',['current_password'=>'example-password-123'])->assertNotFound();
+  $this->postJson('/account/sessions/'.$own.'/revoke',['current_password'=>'example-password-123'])->assertOk()->assertJsonStructure(['user','csrf']);$this->assertDatabaseMissing('sessions',['id'=>'own-device']);$this->assertDatabaseHas('sessions',['id'=>'foreign-device']);$this->getJson('/account')->assertOk();
+ }
+ public function test_device_management_reports_unsupported_session_storage():void {
+  config(['session.driver'=>'array']);$this->actingAs($this->account())->getJson('/account/sessions')->assertJsonPath('supported',false)->assertJsonCount(0,'items');
+  $this->postJson('/account/sessions/unknown/revoke',['current_password'=>'example-password-123'])->assertStatus(409);
+ }
+ public function test_login_attempts_are_limited():void {
+  $this->account();for($i=0;$i<6;$i++)$this->postJson('/login',['email'=>'one@example.com','password'=>'wrong'])->assertUnprocessable();
+  $this->postJson('/login',['email'=>'one@example.com','password'=>'wrong'])->assertStatus(429);
+ }
 }

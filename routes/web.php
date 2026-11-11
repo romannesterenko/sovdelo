@@ -9,22 +9,28 @@ use Illuminate\Support\Facades\{Auth,Route};
 use Illuminate\Validation\{Rule,ValidationException};
 
 Route::view('/', 'app');
-Route::get('/session',fn(Request $r)=>['user'=>$r->user(),'csrf'=>csrf_token()]);
+Route::get('/session',fn(Request $r)=>['user'=>$r->user(),'csrf'=>csrf_token()])->middleware(\App\Http\Middleware\EnsureAccountSession::class);
 Route::post('/register',function(Request $r){
  $r->merge(['email'=>strtolower((string)$r->input('email'))]);
  $data=$r->validate(['name'=>'required|string|max:120','email'=>'required|email|max:254|unique:users,email','password'=>'required|string|min:10|max:128|confirmed']);
  $data['email']=strtolower($data['email']);
- $u=User::create($data);Auth::login($u);$r->session()->regenerate();
+ $u=User::create($data)->fresh();Auth::login($u);$r->session()->regenerate();$r->session()->put('account_auth_version_'.$u->id,(int)$u->auth_version);
  return response()->json(['user'=>$u,'csrf'=>csrf_token()],201);
 })->middleware('throttle:6,1');
 Route::post('/login',function(Request $r){
  $r->merge(['email'=>strtolower((string)$r->input('email'))]);
  $d=$r->validate(['email'=>'required|email|max:254','password'=>'required|string|max:128']);
  if(!Auth::attempt($d,true))throw ValidationException::withMessages(['email'=>'Неверный email или пароль.']);
- $r->session()->regenerate();return ['user'=>$r->user(),'csrf'=>csrf_token()];
+ $r->session()->regenerate();$r->session()->put('account_auth_version_'.$r->user()->id,(int)$r->user()->auth_version);return ['user'=>$r->user(),'csrf'=>csrf_token()];
 })->middleware('throttle:6,1');
 Route::post('/logout',function(Request $r){Auth::logout();$r->session()->invalidate();$r->session()->regenerateToken();return ['csrf'=>csrf_token()];})->middleware('auth');
-Route::middleware('auth')->group(function(){
+Route::middleware(['auth',\App\Http\Middleware\EnsureAccountSession::class])->group(function(){
+ Route::get('/account',[\App\Http\Controllers\AccountController::class,'profile']);
+ Route::patch('/account',[\App\Http\Controllers\AccountController::class,'update']);
+ Route::put('/account/password',[\App\Http\Controllers\AccountController::class,'password'])->middleware('throttle:6,1');
+ Route::get('/account/sessions',[\App\Http\Controllers\AccountController::class,'sessions']);
+ Route::post('/account/sessions/{session}/revoke',[\App\Http\Controllers\AccountController::class,'revoke'])->middleware('throttle:6,1');
+
  Route::get('/notifications/settings',[\App\Http\Controllers\TaskNotificationsController::class,'settings']);
  Route::put('/notifications/settings',[\App\Http\Controllers\TaskNotificationsController::class,'saveSettings']);
  Route::get('/notifications',[\App\Http\Controllers\TaskNotificationsController::class,'index']);
