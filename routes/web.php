@@ -1,5 +1,7 @@
 <?php
 use App\Models\{User,Project,Task};
+use App\Services\TaskOrder;
+use App\Http\Controllers\TaskDetailsController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\{Auth,Route};
 use Illuminate\Validation\{Rule,ValidationException};
@@ -21,16 +23,32 @@ Route::post('/login',function(Request $r){
 })->middleware('throttle:6,1');
 Route::post('/logout',function(Request $r){Auth::logout();$r->session()->invalidate();$r->session()->regenerateToken();return ['csrf'=>csrf_token()];})->middleware('auth');
 Route::middleware('auth')->group(function(){
- Route::get('/data',fn(Request $r)=>['projects'=>Project::where('user_id',$r->user()->id)->orderBy('id')->get(),'tasks'=>Task::where('user_id',$r->user()->id)->orderBy('id')->get()]);
+ Route::get('/labels',[TaskDetailsController::class,'labels']);
+ Route::post('/labels',[TaskDetailsController::class,'createLabel']);
+ Route::get('/tasks/{task}/details',[TaskDetailsController::class,'show']);
+ Route::put('/tasks/{task}/labels',[TaskDetailsController::class,'setLabels']);
+ Route::post('/tasks/{task}/comments',[TaskDetailsController::class,'comment']);
+ Route::patch('/tasks/{task}/comments/{comment}',[TaskDetailsController::class,'editComment']);
+ Route::delete('/tasks/{task}/comments/{comment}',[TaskDetailsController::class,'deleteComment']);
+ Route::post('/tasks/{task}/attachments',[TaskDetailsController::class,'upload']);
+ Route::get('/tasks/{task}/attachments/{attachment}',[TaskDetailsController::class,'download']);
+ Route::delete('/tasks/{task}/attachments/{attachment}',[TaskDetailsController::class,'deleteFile']);
+
+ Route::get('/data',fn(Request $r)=>['projects'=>Project::where('user_id',$r->user()->id)->orderBy('id')->get(),'tasks'=>Task::where('user_id',$r->user()->id)->orderBy('sort_order')->orderBy('id')->get()]);
  Route::post('/projects',function(Request $r){$d=$r->validate(['name'=>'required|string|max:120']);return Project::create($d+['user_id'=>$r->user()->id]);});
  Route::post('/tasks',function(Request $r){
   $d=$r->validate(['title'=>'required|string|max:240','project_id'=>['nullable',Rule::exists('projects','id')->where('user_id',$r->user()->id)],'due_date'=>'nullable|date_format:Y-m-d']);
-  return response()->json(Task::create($d+['user_id'=>$r->user()->id,'checklist'=>[]])->fresh(),201);
+  return response()->json(app(TaskOrder::class)->create($r->user()->id,$d),201);
+ });
+ Route::post('/tasks/{task}/move',function(Request $r,Task $task){
+  abort_unless($task->user_id===$r->user()->id,404);
+  $d=$r->validate(['status'=>['required',Rule::in(['todo','doing','done'])],'before_id'=>'nullable|integer|min:1']);
+  return ['tasks'=>app(TaskOrder::class)->move($r->user()->id,$task->id,$d['status'],isset($d['before_id'])?(int)$d['before_id']:null)];
  });
  Route::patch('/tasks/{task}',function(Request $r,Task $task){
   abort_unless($task->user_id===$r->user()->id,404);
   $d=$r->validate(['title'=>'sometimes|required|string|max:240','project_id'=>['nullable',Rule::exists('projects','id')->where('user_id',$r->user()->id)],'description'=>'nullable|string|max:20000','status'=>['sometimes',Rule::in(['todo','doing','done'])],'priority'=>['sometimes',Rule::in(['normal','high'])],'due_date'=>'nullable|date_format:Y-m-d','checklist'=>'sometimes|array|max:100','checklist.*'=>'required|array:text,done','checklist.*.text'=>'required|string|max:500','checklist.*.done'=>'required|boolean']);
-  $task->update($d);return $task->fresh();
+  return app(TaskOrder::class)->update($r->user()->id,$task->id,$d);
  });
- Route::delete('/tasks/{task}',function(Request $r,Task $task){abort_unless($task->user_id===$r->user()->id,404);$task->delete();return response()->noContent();});
+ Route::delete('/tasks/{task}',function(Request $r,Task $task){abort_unless($task->user_id===$r->user()->id,404);app(TaskOrder::class)->delete($r->user()->id,$task->id);return response()->noContent();});
 });

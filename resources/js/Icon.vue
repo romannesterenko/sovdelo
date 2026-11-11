@@ -1,0 +1,5 @@
+<script setup lang="ts">
+withDefaults(defineProps<{name:string;size?:number}>(),{size:18});
+const paths:Record<string,string>={attachment:'M8 12l6-6a4 4 0 0 1 6 6l-9 9a6 6 0 0 1-8-8l10-10 M6 15l9-9',comment:'M3 3h18v14H9l-6 4V3z M7 7h10 M7 11h7',inbox:'M3 4h18v16H3z M3 13h5l2 3h4l2-3h5',today:'M4 5h16v16H4z M8 2v6 M16 2v6 M4 10h16',upcoming:'M12 8v5l3 2 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',all:'M8 6h13 M8 12h13 M8 18h13 M3 6h1 M3 12h1 M3 18h1',project:'M3 7h7l2-3h9v16H3z',checklist:'M9 5h12 M9 12h12 M9 19h12 M2 5l2 2 3-4 M2 12l2 2 3-4 M2 19l2 2 3-4',flag:'M5 22V3 M5 3c5-5 9 5 14 0v11c-5 5-9-5-14 0',theme:'M12 2a10 10 0 1 0 0 20V2z'};
+</script>
+<template><svg :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="icon"><path :d="paths[name]||paths.all"/></svg></template>

@@ -42,7 +42,7 @@
     ],
     "dev": [
       "Composer\\Config::disableProcessTimeout",
-      "npx concurrently \"php artisan serve --host=127.0.0.1 --port=8010\" \"npm run dev -- --host 127.0.0.1\" --names=server,vite --kill-others"
+      "npx concurrently \"php -d upload_max_filesize=12M -d post_max_size=14M artisan serve --host=127.0.0.1 --port=8010\" \"npm run dev -- --host 127.0.0.1\" --names=server,vite --kill-others"
     ],
     "test": [
       "bash test.sh"
