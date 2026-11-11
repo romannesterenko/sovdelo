@@ -351,4 +351,71 @@ class WorkspaceTest extends TestCase {
   $this->getJson('/data')->assertOk();$copy=Task::whereNotNull('task_series_id')->firstOrFail();$this->deleteJson('/tasks/'.$copy->id)->assertNoContent();
   $this->patchJson('/task-series/'.$id,['frequency'=>'daily','next_date'=>'2026-11-11'])->assertOk();$this->getJson('/data')->assertJsonCount(1,'tasks');$this->assertDatabaseCount('tasks',2);
  }
+ public function test_deadline_notification_respects_account_time_and_is_sent_once():void {
+  $u=$this->account();$this->actingAs($u);Task::create(['user_id'=>$u->id,'title'=>'Дедлайн','due_date'=>'2026-11-11']);
+  $this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 05:59:00','UTC'));$this->getJson('/notifications')->assertOk()->assertJsonCount(0,'items');
+  $this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 06:00:00','UTC'));$this->getJson('/notifications')->assertJsonCount(1,'items')->assertJsonPath('unread',1)->assertJsonPath('items.0.kind','deadline');
+  $this->getJson('/notifications')->assertJsonCount(1,'items');$this->artisan('sovdelo:reminders')->assertSuccessful();$this->assertDatabaseCount('task_notifications',1);
+ }
+ public function test_custom_reminder_converts_local_time_to_utc_and_can_be_cancelled():void {
+  $u=$this->account();$this->actingAs($u);$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$t=Task::create(['user_id'=>$u->id,'title'=>'Позвонить']);
+  $this->putJson('/tasks/'.$t->id.'/reminder',['local'=>'2026-11-11T16:00'])->assertOk()->assertJsonPath('local','2026-11-11T16:00')->assertJsonPath('sent',false);
+  $this->assertSame('13:00',$t->fresh()->remind_at->utc()->format('H:i'));$this->getJson('/notifications')->assertJsonCount(0,'items');
+  $this->putJson('/tasks/'.$t->id.'/reminder',['local'=>null])->assertOk()->assertJsonPath('at',null);
+  $this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 14:00:00','UTC'));$this->getJson('/notifications')->assertJsonCount(0,'items');
+ }
+ public function test_missed_custom_reminder_is_delivered_once_after_return():void {
+  $u=$this->account();$this->actingAs($u);$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$t=Task::create(['user_id'=>$u->id,'title'=>'Звонок']);
+  $this->putJson('/tasks/'.$t->id.'/reminder',['local'=>'2026-11-11T16:00'])->assertOk();
+  $this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-15 12:00:00','UTC'));$this->getJson('/notifications')->assertJsonCount(1,'items')->assertJsonPath('items.0.kind','custom');$this->getJson('/notifications')->assertJsonCount(1,'items');
+  $this->getJson('/tasks/'.$t->id.'/reminder')->assertJsonPath('sent',true);
+ }
+ public function test_completed_archived_and_trashed_tasks_do_not_emit_notifications():void {
+  $u=$this->account();$this->actingAs($u);$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));
+  $p=Project::create(['user_id'=>$u->id,'name'=>'Архив']);
+  foreach(['active','done','archive','trash','project'] as $kind){$t=Task::create(['user_id'=>$u->id,'title'=>$kind,'status'=>$kind==='done'?'done':'todo','due_date'=>'2026-11-10','project_id'=>$kind==='project'?$p->id:null]);if($kind==='archive')$this->postJson('/tasks/'.$t->id.'/archive')->assertOk();if($kind==='trash')$this->deleteJson('/tasks/'.$t->id)->assertNoContent();}
+  $this->postJson('/projects/'.$p->id.'/archive')->assertOk();$this->getJson('/notifications')->assertJsonCount(1,'items')->assertJsonPath('items.0.title','active');
+ }
+ public function test_notification_settings_disable_delivery_and_reenable_catches_up():void {
+  $u=$this->account();$this->actingAs($u);$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));Task::create(['user_id'=>$u->id,'title'=>'Срок','due_date'=>'2026-11-11']);
+  $d=['notifications_enabled'=>false,'deadline_notifications'=>true,'notification_time'=>'09:00'];$this->putJson('/notifications/settings',$d)->assertOk();$this->getJson('/notifications')->assertJsonCount(0,'items');
+  $d['notifications_enabled']=true;$d['deadline_notifications']=false;$this->putJson('/notifications/settings',$d)->assertOk();$this->getJson('/notifications')->assertJsonCount(0,'items');
+  $d['deadline_notifications']=true;$this->putJson('/notifications/settings',$d)->assertOk();$this->getJson('/notifications')->assertJsonCount(1,'items');
+  $this->putJson('/notifications/settings',[...$d,'notification_time'=>'25:00'])->assertUnprocessable();
+ }
+ public function test_notification_read_and_read_all_are_scoped_and_preserve_new_arrivals():void {
+  $a=$this->account();$b=$this->account('notices@example.com');$this->actingAs($a);
+  $create=fn($user,$key)=>\App\Models\TaskNotification::create(['user_id'=>$user->id,'event_key'=>$key,'kind'=>'custom','title'=>$key,'scheduled_at'=>now()]);
+  $old=$create($a,'old');$foreign=$create($b,'foreign');$new=$create($a,'new');
+  $this->postJson('/notifications/'.$foreign->id.'/read')->assertNotFound();
+  $this->postJson('/notifications/read-all',['through_id'=>$old->id])->assertOk();$this->assertNotNull($old->fresh()->read_at);$this->assertNull($new->fresh()->read_at);$this->assertNull($foreign->fresh()->read_at);
+  $this->postJson('/notifications/'.$new->id.'/read')->assertOk();$this->getJson('/notifications')->assertJsonCount(2,'items')->assertJsonPath('unread',0);
+ }
+ public function test_reminder_accounts_and_guests_are_isolated():void {
+  $this->getJson('/notifications')->assertUnauthorized();$this->getJson('/notifications/settings')->assertUnauthorized();
+  $a=$this->account();$b=$this->account('reminders@example.com');$t=Task::create(['user_id'=>$a->id,'title'=>'Личная']);$this->actingAs($b);
+  $this->getJson('/tasks/'.$t->id.'/reminder')->assertNotFound();$this->putJson('/tasks/'.$t->id.'/reminder',['local'=>null])->assertNotFound();
+  $this->getJson('/notifications')->assertJsonCount(0,'items');
+ }
+ public function test_reminder_validation_rejects_past_and_nonexistent_local_time():void {
+  $u=$this->account();$u->timezone='Europe/Berlin';$u->save();$this->actingAs($u);$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$t=Task::create(['user_id'=>$u->id,'title'=>'Часы']);
+  $this->putJson('/tasks/'.$t->id.'/reminder',['local'=>'2026-11-10T09:00'])->assertUnprocessable();
+  $this->putJson('/tasks/'.$t->id.'/reminder',['local'=>'2027-03-28T02:30'])->assertUnprocessable();
+  $this->putJson('/tasks/'.$t->id.'/reminder',['local'=>'2027-03-28T03:30'])->assertOk();
+ }
+ public function test_notification_date_uses_timezone_across_utc_midnight():void {
+  $u=$this->account();$u->timezone='Asia/Vladivostok';$u->save();$this->actingAs($u);$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-10 23:01:00','UTC'));Task::create(['user_id'=>$u->id,'title'=>'Утро','due_date'=>'2026-11-11']);
+  $this->getJson('/notifications')->assertJsonCount(1,'items');$n=\App\Models\TaskNotification::firstOrFail();$this->assertSame('2026-11-10 23:00',$n->scheduled_at->utc()->format('Y-m-d H:i'));
+ }
+ public function test_notification_pagination_and_unread_count_include_older_items():void {
+  $u=$this->account();$this->actingAs($u);for($i=1;$i<=35;$i++)\App\Models\TaskNotification::create(['user_id'=>$u->id,'event_key'=>'notice'.$i,'kind'=>'custom','title'=>'Задача','scheduled_at'=>now()]);
+  $d=$this->getJson('/notifications')->assertJsonCount(30,'items')->assertJsonPath('unread',35)->assertJsonPath('has_more',true)->json();
+  $this->getJson('/notifications?before='.$d['items'][29]['id'])->assertJsonCount(5,'items')->assertJsonPath('has_more',false);
+ }
+ public function test_queued_reminder_job_is_idempotent_and_deadline_change_is_new_event():void {
+  $u=$this->account();$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$t=Task::create(['user_id'=>$u->id,'title'=>'Срок','due_date'=>'2026-11-10']);
+  (new \App\Jobs\GenerateTaskReminders($u->id))->handle(app(\App\Services\TaskReminders::class));(new \App\Jobs\GenerateTaskReminders($u->id))->handle(app(\App\Services\TaskReminders::class));$this->assertDatabaseCount('task_notifications',1);
+  $this->actingAs($u)->patchJson('/tasks/'.$t->id,['due_date'=>'2026-11-11'])->assertOk();$this->getJson('/notifications')->assertJsonCount(2,'items');
+  \Illuminate\Support\Facades\Bus::fake();$this->artisan('sovdelo:reminders --queue')->assertSuccessful();\Illuminate\Support\Facades\Bus::assertDispatched(\App\Jobs\GenerateTaskReminders::class);
+ }
 }

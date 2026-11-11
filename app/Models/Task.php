@@ -12,5 +12,5 @@ class Task extends Model {
  public function comments(){return $this->hasMany(TaskComment::class);}
  public function attachments(){return $this->hasMany(TaskAttachment::class);}
  protected $fillable=['user_id','project_id','title','description','status','priority','due_date','planned_date','checklist'];
- protected function casts(): array {return ['checklist'=>'array','user_id'=>'integer','project_id'=>'integer','sort_order'=>'integer','archived_at'=>'datetime'];}
+ protected function casts(): array {return ['remind_at'=>'immutable_datetime','checklist'=>'array','user_id'=>'integer','project_id'=>'integer','sort_order'=>'integer','archived_at'=>'datetime'];}
 }

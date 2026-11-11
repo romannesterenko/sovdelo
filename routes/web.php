@@ -25,6 +25,14 @@ Route::post('/login',function(Request $r){
 })->middleware('throttle:6,1');
 Route::post('/logout',function(Request $r){Auth::logout();$r->session()->invalidate();$r->session()->regenerateToken();return ['csrf'=>csrf_token()];})->middleware('auth');
 Route::middleware('auth')->group(function(){
+ Route::get('/notifications/settings',[\App\Http\Controllers\TaskNotificationsController::class,'settings']);
+ Route::put('/notifications/settings',[\App\Http\Controllers\TaskNotificationsController::class,'saveSettings']);
+ Route::get('/notifications',[\App\Http\Controllers\TaskNotificationsController::class,'index']);
+ Route::post('/notifications/read-all',[\App\Http\Controllers\TaskNotificationsController::class,'readAll']);
+ Route::post('/notifications/{notification}/read',[\App\Http\Controllers\TaskNotificationsController::class,'read']);
+ Route::get('/tasks/{task}/reminder',[\App\Http\Controllers\TaskNotificationsController::class,'reminder']);
+ Route::put('/tasks/{task}/reminder',[\App\Http\Controllers\TaskNotificationsController::class,'saveReminder']);
+
  Route::get('/task-series',[\App\Http\Controllers\TaskSeriesController::class,'index']);
  Route::post('/task-series',[\App\Http\Controllers\TaskSeriesController::class,'store']);
  Route::patch('/task-series/{series}',[\App\Http\Controllers\TaskSeriesController::class,'update']);
