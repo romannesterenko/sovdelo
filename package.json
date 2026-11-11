@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build"
+    "build": "vue-tsc --noEmit && vite build",
+    "test:frontend": "node scripts/test-frontend.mjs"
   },
   "dependencies": {
     "maplibre-gl": "^6.16.0",

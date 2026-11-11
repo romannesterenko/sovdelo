@@ -224,4 +224,19 @@ class WorkspaceTest extends TestCase {
   $this->postJson('/tasks/'.$b->id.'/archive')->assertOk();
   $this->postJson('/tasks/'.$a->id.'/move',['status'=>'doing'])->assertOk()->assertJsonCount(1,'tasks')->assertJsonPath('tasks.0.id',$a->id);
  }
+
+ public function test_planning_and_deadline_are_independent():void {
+  $this->actingAs($this->account());$id=$this->postJson('/tasks',['title'=>'Plan','planned_date'=>'2026-11-11','due_date'=>'2026-11-20'])->assertCreated()->assertJsonPath('planned_date','2026-11-11')->json('id');
+  $this->patchJson('/tasks/'.$id,['planned_date'=>'2026-11-12'])->assertOk()->assertJsonPath('due_date','2026-11-20')->assertJsonPath('planned_date','2026-11-12');
+  $this->patchJson('/tasks/'.$id,['planned_date'=>null])->assertOk()->assertJsonPath('planned_date',null)->assertJsonPath('due_date','2026-11-20');
+ }
+ public function test_invalid_planned_date_is_rejected():void {
+  $this->actingAs($this->account())->postJson('/tasks',['title'=>'Plan','planned_date'=>'invalid'])->assertUnprocessable();
+ }
+ public function test_timezone_preferences_are_per_account():void {
+  $a=$this->account();$b=$this->account('two@example.com');
+  $this->actingAs($a)->patchJson('/preferences',['timezone'=>'Asia/Vladivostok'])->assertOk()->assertJsonPath('user.timezone','Asia/Vladivostok');
+  $this->assertDatabaseHas('users',['id'=>$a->id,'timezone'=>'Asia/Vladivostok']);$this->assertDatabaseHas('users',['id'=>$b->id,'timezone'=>'Europe/Moscow']);
+  $this->patchJson('/preferences',['timezone'=>'Invalid/Zone'])->assertUnprocessable();
+ }
 }

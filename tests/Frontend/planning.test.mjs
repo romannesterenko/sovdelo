@@ -1,0 +1,12 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+if(!process.env.SOVDELO_PLANNING_MODULE)throw Error('Запускайте через npm run test:frontend');
+const {dateInZone,shiftDay,overdue,dueToday,upcoming}=await import(process.env.SOVDELO_PLANNING_MODULE);
+const task=(x={})=>({status:'todo',planned_date:null,due_date:null,...x});
+test('one instant can belong to different days by timezone',()=>{const now=new Date('2026-11-11T22:30:00Z');assert.equal(dateInZone(now,'Europe/Moscow'),'2026-11-12');assert.equal(dateInZone(now,'UTC'),'2026-11-11')});
+test('month year and leap day boundaries',()=>{assert.equal(shiftDay('2026-12-31',1),'2027-01-01');assert.equal(shiftDay('2028-02-28',1),'2028-02-29');assert.equal(shiftDay('2028-02-29',1),'2028-03-01')});
+test('missed planned tasks remain today',()=>assert.equal(dueToday(task({planned_date:'2026-11-10'}),'2026-11-11'),true));
+test('future planned date does not hide an overdue deadline',()=>{const t=task({planned_date:'2026-11-15',due_date:'2026-11-10'});assert.equal(dueToday(t,'2026-11-11'),true);assert.equal(overdue(t,'2026-11-11'),true);assert.equal(upcoming(t,'2026-11-11'),false)});
+test('completed old tasks do not return as overdue',()=>{const t=task({status:'done',due_date:'2026-11-10'});assert.equal(dueToday(t,'2026-11-11'),false);assert.equal(overdue(t,'2026-11-11'),false)});
+test('deadline today is not overdue',()=>{const t=task({due_date:'2026-11-11'});assert.equal(dueToday(t,'2026-11-11'),true);assert.equal(overdue(t,'2026-11-11'),false)});
+test('future plan is upcoming',()=>assert.equal(upcoming(task({planned_date:'2026-11-12'}),'2026-11-11'),true));
+test('undated tasks stay out of date based views',()=>{assert.equal(dueToday(task(),'2026-11-11'),false);assert.equal(upcoming(task(),'2026-11-11'),false)});
