@@ -76,7 +76,7 @@ class WorkspaceTest extends TestCase {
   $this->patchJson('/tasks/'.$id,['status'=>'done'])->assertOk()->assertJsonPath('status','done');
   $this->patchJson('/tasks/'.$id,['status'=>'todo'])->assertOk()->assertJsonPath('status','todo');
   $this->deleteJson('/tasks/'.$id)->assertNoContent();
-  $this->assertDatabaseMissing('tasks',['id'=>$id]);
+  $this->assertSoftDeleted('tasks',['id'=>$id]);
  }
 
  private function boardTask(User $u,string $title,string $status='todo',int $order=1024,?int $project=null):Task {
@@ -174,5 +174,54 @@ class WorkspaceTest extends TestCase {
   $u=$this->account();$a=$this->boardTask($u,'A');$b=$this->boardTask($u,'B');$c=\App\Models\TaskComment::create(['task_id'=>$a->id,'user_id'=>$u->id,'body'=>'Keep']);
   $this->actingAs($u)->patchJson('/tasks/'.$b->id.'/comments/'.$c->id,['body'=>'Wrong'])->assertNotFound();
   $this->assertDatabaseHas('task_comments',['id'=>$c->id,'body'=>'Keep']);
+ }
+
+ public function test_archived_task_is_hidden_and_restorable():void {
+  $u=$this->account();$t=$this->boardTask($u,'Archive');$this->actingAs($u);
+  $this->postJson('/tasks/'.$t->id.'/archive')->assertOk();
+  $this->getJson('/data')->assertJsonCount(0,'tasks');
+  $this->getJson('/lifecycle')->assertJsonPath('archived_tasks.0.id',$t->id);
+  $this->postJson('/tasks/'.$t->id.'/restore')->assertOk();
+  $this->getJson('/data')->assertJsonPath('tasks.0.id',$t->id);
+ }
+ public function test_trash_preserves_checklist_labels_comments_and_files():void {
+  \Illuminate\Support\Facades\Storage::fake('local');$u=$this->account();$t=$this->boardTask($u,'Keep');
+  $t->checklist=[['text'=>'Keep checklist','done'=>true]];$t->save();
+  $l=\App\Models\Label::create(['user_id'=>$u->id,'name'=>'Keep label','color'=>'green']);$t->labels()->attach($l->id);
+  \App\Models\TaskComment::create(['task_id'=>$t->id,'user_id'=>$u->id,'body'=>'Keep comment']);
+  \Illuminate\Support\Facades\Storage::disk('local')->put('keep.txt','keep');
+  \App\Models\TaskAttachment::create(['task_id'=>$t->id,'name'=>'keep.txt','path'=>'keep.txt','bytes'=>4]);
+  $this->actingAs($u)->deleteJson('/tasks/'.$t->id)->assertNoContent();
+  $this->assertSoftDeleted('tasks',['id'=>$t->id]);
+  $this->getJson('/data')->assertJsonCount(0,'tasks');
+  $this->getJson('/lifecycle')->assertJsonPath('trashed_tasks.0.id',$t->id);
+  $this->postJson('/tasks/'.$t->id.'/restore')->assertOk();
+  $this->getJson('/tasks/'.$t->id.'/details')->assertJsonPath('task.checklist.0.text','Keep checklist')->assertJsonPath('task.labels.0.name','Keep label')->assertJsonPath('comments.0.body','Keep comment')->assertJsonPath('attachments.0.name','keep.txt');
+  \Illuminate\Support\Facades\Storage::disk('local')->assertExists('keep.txt');
+ }
+ public function test_archived_project_hides_tasks_and_restores_them():void {
+  $u=$this->account();$p=Project::create(['user_id'=>$u->id,'name'=>'Archive project']);$this->boardTask($u,'Task','todo',1024,$p->id);$this->actingAs($u);
+  $this->postJson('/projects/'.$p->id.'/archive')->assertOk();
+  $this->getJson('/data')->assertJsonCount(0,'projects')->assertJsonCount(0,'tasks');
+  $this->getJson('/lifecycle')->assertJsonPath('archived_projects.0.id',$p->id)->assertJsonCount(1,'archived_tasks');
+  $this->postJson('/projects/'.$p->id.'/restore')->assertOk();
+  $this->getJson('/data')->assertJsonCount(1,'projects')->assertJsonCount(1,'tasks');
+ }
+ public function test_cannot_create_in_archived_project_or_move_archived_task():void {
+  $u=$this->account();$p=Project::create(['user_id'=>$u->id,'name'=>'Hidden']);$t=$this->boardTask($u,'Hidden','todo',1024,$p->id);$this->actingAs($u);
+  $this->postJson('/projects/'.$p->id.'/archive')->assertOk();
+  $this->postJson('/tasks',['title'=>'Denied','project_id'=>$p->id])->assertUnprocessable();
+  $this->postJson('/tasks/'.$t->id.'/move',['status'=>'doing'])->assertUnprocessable();
+ }
+ public function test_other_account_cannot_restore_or_archive():void {
+  $a=$this->account();$b=$this->account('two@example.com');$p=Project::create(['user_id'=>$a->id,'name'=>'Private']);$t=$this->boardTask($a,'Private');$t->delete();
+  $this->actingAs($b)->postJson('/tasks/'.$t->id.'/restore')->assertNotFound();
+  $this->postJson('/projects/'.$p->id.'/archive')->assertNotFound();
+  $this->getJson('/lifecycle')->assertJsonCount(0,'trashed_tasks')->assertJsonCount(0,'archived_projects');
+ }
+ public function test_archived_task_does_not_return_from_board_move_response():void {
+  $u=$this->account();$a=$this->boardTask($u,'Active');$b=$this->boardTask($u,'Hidden');$this->actingAs($u);
+  $this->postJson('/tasks/'.$b->id.'/archive')->assertOk();
+  $this->postJson('/tasks/'.$a->id.'/move',['status'=>'doing'])->assertOk()->assertJsonCount(1,'tasks')->assertJsonPath('tasks.0.id',$a->id);
  }
 }

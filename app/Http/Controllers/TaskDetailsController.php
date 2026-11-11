@@ -39,7 +39,7 @@ class TaskDetailsController
   try{return $this->locked($r,$task,function($t)use($r,&$path){
    abort_if($t->attachments()->count()>=50,422,'Максимум 50 файлов на задачу.');
    $bytes=(int)$r->file('file')->getSize();
-   $total=TaskAttachment::whereIn('task_id',Task::where('user_id',$r->user()->id)->select('id'))->sum('bytes');
+   $total=TaskAttachment::whereIn('task_id',Task::withTrashed()->where('user_id',$r->user()->id)->select('id'))->sum('bytes');
    abort_if($total+$bytes>250*1024*1024,422,'Превышен лимит вложений аккаунта: 250 МБ.');
    $path=$r->file('file')->store('task-files/'.$r->user()->id,'local');
    if(!$path)throw new \RuntimeException('Не удалось сохранить файл.');
