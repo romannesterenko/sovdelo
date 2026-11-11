@@ -1,0 +1,75 @@
+name: SovDelo checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Laravel PostgreSQL tests and Vue build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: sovdelo_testing
+          POSTGRES_USER: sovdelo_testing
+          POSTGRES_PASSWORD: ci_ephemeral_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sovdelo_testing -d sovdelo_testing"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5432'
+      DB_DATABASE: sovdelo_testing
+      DB_USERNAME: sovdelo_testing
+      DB_PASSWORD: ci_ephemeral_password
+      DB_URL: ''
+      CACHE_STORE: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+      MAIL_MAILER: array
+      BCRYPT_ROUNDS: '4'
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: PHP 8.3
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, intl, curl, dom, xml, zip, pdo_pgsql
+          coverage: none
+          tools: composer:v2
+      - name: Node 22
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: |
+          cp .env.example .env
+          composer install --no-interaction --prefer-dist --no-progress
+          php artisan key:generate
+          npm ci --include=dev --ignore-scripts --no-audit --no-fund
+      - name: Check shell scripts and tracked files
+        run: |
+          for file in setup.sh test.sh scripts/*.sh; do bash -n "$file"; done
+          bash scripts/check-git.sh
+      - name: Build Vue and validate TypeScript
+        run: npm run build
+      - name: Laravel tests
+        run: php artisan test --filter=WorkspaceTest
