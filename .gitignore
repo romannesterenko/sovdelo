@@ -48,3 +48,6 @@ id_rsa*
 *.zip
 *.tar.gz
 /bootstrap/cache/*.php
+
+# Temporary files created by Laravel tests
+/storage/framework/testing/
