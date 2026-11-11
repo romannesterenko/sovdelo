@@ -28,7 +28,7 @@ class TaskTimer
    if($active&&$active->task_id===$taskId)return $this->state($userId);
    if($active)$this->close($active,'switch');
    TimeSession::create(['user_id'=>$userId,'task_id'=>$taskId,'request_key'=>$key,'started_at'=>now()]);
-   if($t->status==='todo'){$t->sort_order=((int)Task::where('user_id',$userId)->where('status','doing')->max('sort_order'))+1024;$t->status='doing';$t->save();}
+   if($t->status==='todo'){$t->sort_order=((int)Task::where('user_id',$userId)->where('board_column','doing')->max('sort_order'))+1024;$t->status='doing';$t->board_column='doing';$t->save();}
    return $this->state($userId);
   });
  }

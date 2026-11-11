@@ -20,7 +20,7 @@ class RecurringTasks {
     while($next<=$today){$date=$next;$next=$this->advance($date,$s->frequency,$s->anchor_day);}
     if(!Task::withTrashed()->where('task_series_id',$s->id)->where('occurrence_date',$date)->exists()){
      $task=new Task(['user_id'=>$userId,'project_id'=>$s->project_id,'title'=>$s->title,'description'=>$s->description,'priority'=>$s->priority,'status'=>'todo','planned_date'=>$date,'checklist'=>array_map(fn($i)=>['text'=>$i['text'],'done'=>false],$s->checklist)]);
-     $task->task_series_id=$s->id;$task->occurrence_date=$date;$task->sort_order=((int)Task::where('user_id',$userId)->where('status','todo')->max('sort_order'))+1024;$task->save();
+     $task->task_series_id=$s->id;$task->occurrence_date=$date;$task->sort_order=((int)Task::where('user_id',$userId)->where('board_column','todo')->max('sort_order'))+1024;$task->save();
      $task->labels()->sync(Label::where('user_id',$userId)->whereIn('id',$s->label_ids)->pluck('id'));$count++;
     }
     $s->next_date=$next;$s->save();

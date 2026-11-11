@@ -476,7 +476,7 @@ class WorkspaceTest extends TestCase {
  private function transferRequest(array $document,string $strategy='skip',?string $key=null):array {$payload=json_encode($document,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR);return ['payload'=>$payload,'strategy'=>$strategy,'fingerprint'=>hash('sha256',$payload),'request_key'=>$key??(string)\Illuminate\Support\Str::uuid()];}
  public function test_transfer_export_is_scoped_and_contains_archive_trash_without_credentials():void {
   $a=$this->account();$b=$this->account('export@example.com');$p=Project::create(['user_id'=>$a->id,'name'=>'Мой проект']);$p->archived_at=now();$p->save();$t=Task::create(['user_id'=>$a->id,'project_id'=>$p->id,'title'=>'Корзина']);$t->delete();Task::create(['user_id'=>$b->id,'title'=>'Чужая']);
-  $d=$this->actingAs($a)->getJson('/transfer/export')->assertOk()->assertJsonPath('format','sovdelo.transfer')->assertJsonPath('schema_version',1)->assertJsonCount(1,'projects')->assertJsonCount(1,'tasks')->json();
+  $d=$this->actingAs($a)->getJson('/transfer/export')->assertOk()->assertJsonPath('format','sovdelo.transfer')->assertJsonPath('schema_version',2)->assertJsonCount(1,'projects')->assertJsonCount(1,'tasks')->json();
   $this->assertNotNull($d['tasks'][0]['deleted_at']);$this->assertNotNull($d['projects'][0]['archived_at']);$this->assertArrayNotHasKey('user_id',$d['tasks'][0]);$this->assertArrayNotHasKey('id',$d['tasks'][0]);$this->assertStringNotContainsString('password',json_encode($d));
  }
  public function test_transfer_round_trip_preserves_content_labels_comments_and_time():void {
@@ -520,5 +520,38 @@ class WorkspaceTest extends TestCase {
  public function test_transfer_duplicate_uuid_and_invalid_time_are_rejected():void {
   $this->actingAs($this->account());$d=$this->transferDocument();$task=$this->transferTask();$d['tasks']=[$task,$task];$d['tasks'][1]['uuid']=strtoupper($task['uuid']);$this->postJson('/transfer/preview',$this->transferRequest($d))->assertUnprocessable();
   $d['tasks']=[$task];$d['tasks'][0]['time'][]=['started_at'=>'2026-11-11T12:00:00+00:00','ended_at'=>'2026-11-11T11:00:00+00:00','seconds'=>60,'end_reason'=>'stop','adjustments'=>[]];$this->postJson('/transfer/preview',$this->transferRequest($d))->assertUnprocessable();
+ }
+ private function boardSettings(int $uid):array {return app(\App\Services\BoardColumns::class)->all($uid)->map(fn($c)=>['key'=>$c->key,'name'=>$c->name,'kind'=>$c->kind])->all();}
+ public function test_board_columns_can_be_added_renamed_reordered_and_are_private():void {
+  $a=$this->account();$b=$this->account('columns@example.com');$this->actingAs($a);$rows=$this->boardSettings($a->id);$rows[0]['name']='Планы';$rows[]=['key'=>null,'name'=>'Проверка','kind'=>'doing'];$rows=[$rows[3],$rows[0],$rows[1],$rows[2]];
+  $this->putJson('/board-columns',['columns'=>$rows])->assertOk()->assertJsonPath('columns.0.name','Проверка')->assertJsonPath('columns.1.name','Планы');$this->getJson('/data')->assertJsonCount(4,'columns')->assertJsonPath('columns.0.kind','doing');
+  $this->actingAs($b)->getJson('/data')->assertJsonCount(3,'columns')->assertJsonPath('columns.0.name','К выполнению');
+ }
+ public function test_move_to_filled_custom_column_preserves_order_and_semantic_status():void {
+  $u=$this->account();$this->actingAs($u);$key=(string)\Illuminate\Support\Str::uuid();\App\Models\BoardColumn::create(['user_id'=>$u->id,'key'=>$key,'name'=>'Ревью','kind'=>'doing','sort_order'=>4096]);$ids=[];foreach(['A','B','C'] as $title)$ids[]=$this->postJson('/tasks',['title'=>$title])->assertCreated()->json('id');
+  $this->postJson('/tasks/'.$ids[1].'/move',['column'=>$key])->assertOk();$this->postJson('/tasks/'.$ids[2].'/move',['column'=>$key])->assertOk();$this->postJson('/tasks/'.$ids[0].'/move',['column'=>$key,'before_id'=>$ids[2]])->assertOk();
+  $this->assertSame([$ids[1],$ids[0],$ids[2]],Task::where('user_id',$u->id)->where('board_column',$key)->orderBy('sort_order')->pluck('id')->all());$this->assertSame(3,Task::where('board_column',$key)->where('status','doing')->count());
+  $this->postJson('/tasks/'.$ids[0].'/move',['column'=>$key,'before_id'=>$ids[2]])->assertOk();$this->assertDatabaseCount('tasks',3);
+ }
+ public function test_custom_completed_column_stops_timer_and_excludes_reminders():void {
+  $u=$this->account();$this->actingAs($u);$this->travelTo(\Carbon\CarbonImmutable::parse('2026-11-11 12:00:00','UTC'));$key=(string)\Illuminate\Support\Str::uuid();\App\Models\BoardColumn::create(['user_id'=>$u->id,'key'=>$key,'name'=>'Выпущено','kind'=>'done','sort_order'=>4096]);$t=Task::create(['user_id'=>$u->id,'title'=>'Таймер','due_date'=>'2026-11-10']);$this->postJson('/tasks/'.$t->id.'/timer',['request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertOk();
+  $this->postJson('/tasks/'.$t->id.'/move',['column'=>$key])->assertOk();$this->assertSame('done',$t->fresh()->status);$this->assertSame(0,\App\Models\TimeSession::where('user_id',$u->id)->whereNull('ended_at')->count());$this->getJson('/notifications')->assertJsonCount(0,'items');
+ }
+ public function test_board_cannot_remove_used_columns_or_change_types_or_reference_foreign_column():void {
+  $a=$this->account();$b=$this->account('foreign-column@example.com');$this->actingAs($a);$key=(string)\Illuminate\Support\Str::uuid();\App\Models\BoardColumn::create(['user_id'=>$a->id,'key'=>$key,'name'=>'Позже','kind'=>'todo','sort_order'=>4096]);$t=Task::create(['user_id'=>$a->id,'title'=>'Корзина']);$this->postJson('/tasks/'.$t->id.'/move',['column'=>$key])->assertOk();$this->deleteJson('/tasks/'.$t->id)->assertNoContent();
+  $rows=$this->boardSettings($a->id);$this->putJson('/board-columns',['columns'=>array_values(array_filter($rows,fn($c)=>$c['key']!==$key))])->assertUnprocessable();$rows[0]['name']='Не должно сохраниться';$rows[0]['kind']='done';$this->putJson('/board-columns',['columns'=>$rows])->assertUnprocessable();$this->assertDatabaseHas('board_columns',['user_id'=>$a->id,'key'=>'todo','name'=>'К выполнению']);
+  $own=Task::create(['user_id'=>$b->id,'title'=>'Другая']);$this->actingAs($b)->postJson('/tasks/'.$own->id.'/move',['column'=>$key])->assertUnprocessable();
+ }
+ public function test_task_modal_column_update_derives_status_and_keeps_column_on_text_edit():void {
+  $u=$this->account();$this->actingAs($u);$key=(string)\Illuminate\Support\Str::uuid();\App\Models\BoardColumn::create(['user_id'=>$u->id,'key'=>$key,'name'=>'Проверка','kind'=>'doing','sort_order'=>4096]);$t=Task::create(['user_id'=>$u->id,'title'=>'Карточка']);
+  $this->patchJson('/tasks/'.$t->id,['board_column'=>$key,'status'=>'todo','title'=>'Проверить'])->assertOk()->assertJsonPath('status','doing')->assertJsonPath('board_column',$key);$this->patchJson('/tasks/'.$t->id,['description'=>'Детали'])->assertOk()->assertJsonPath('board_column',$key);$this->patchJson('/tasks/'.$t->id,['status'=>'done'])->assertOk()->assertJsonPath('board_column','done');
+ }
+ public function test_transfer_v2_preserves_custom_columns_and_v1_still_imports():void {
+  $a=$this->account();$b=$this->account('columns-transfer@example.com');$this->actingAs($a);$key=(string)\Illuminate\Support\Str::uuid();\App\Models\BoardColumn::create(['user_id'=>$a->id,'key'=>$key,'name'=>'Ревью','kind'=>'doing','sort_order'=>4096]);$t=Task::create(['user_id'=>$a->id,'title'=>'Передать']);$this->postJson('/tasks/'.$t->id.'/move',['column'=>$key])->assertOk();
+  $d=$this->getJson('/transfer/export')->assertOk()->assertJsonPath('schema_version',2)->json();$this->actingAs($b)->postJson('/transfer/import',$this->transferRequest($d))->assertOk();$this->assertDatabaseHas('board_columns',['user_id'=>$b->id,'key'=>$key,'kind'=>'doing']);$this->assertDatabaseHas('tasks',['user_id'=>$b->id,'board_column'=>$key,'status'=>'doing']);
+  $old=$this->transferDocument();$old['tasks'][]=$this->transferTask('Версия 1');$this->postJson('/transfer/import',$this->transferRequest($old))->assertOk();$this->assertDatabaseHas('tasks',['user_id'=>$b->id,'title'=>'Версия 1','board_column'=>'todo']);
+ }
+ public function test_start_timer_moves_custom_todo_to_default_working_column():void {
+  $u=$this->account();$this->actingAs($u);$key=(string)\Illuminate\Support\Str::uuid();\App\Models\BoardColumn::create(['user_id'=>$u->id,'key'=>$key,'name'=>'Ожидание','kind'=>'todo','sort_order'=>4096]);$t=Task::create(['user_id'=>$u->id,'title'=>'Начать']);$this->postJson('/tasks/'.$t->id.'/move',['column'=>$key])->assertOk();$this->postJson('/tasks/'.$t->id.'/timer',['request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertOk();$this->assertDatabaseHas('tasks',['id'=>$t->id,'board_column'=>'doing','status'=>'doing']);
  }
 }

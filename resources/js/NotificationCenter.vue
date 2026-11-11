@@ -29,6 +29,7 @@ function key(e:KeyboardEvent){if(e.key==='Escape'){e.stopPropagation();close()}i
 function focus(){if(!document.hidden)void head()}
 onMounted(()=>{void head();interval=setInterval(focus,30000);window.addEventListener('focus',focus);window.addEventListener('online',focus);document.addEventListener('visibilitychange',focus);window.addEventListener('beforeunload',beforeUnload)});
 onUnmounted(()=>{alive=false;if(interval)clearInterval(interval);window.removeEventListener('focus',focus);window.removeEventListener('online',focus);document.removeEventListener('visibilitychange',focus);window.removeEventListener('beforeunload',beforeUnload)});
+defineExpose({open});
 </script>
 <template>
  <button class="notification-bell" :disabled="disabled" :aria-label="'Уведомления, непрочитано: '+unread" @click="open"><Icon name="bell"/><span v-if="unread" class="notification-count">{{unread>99?'99+':unread}}</span><span v-if="pollError" class="notification-offline" title="Нет связи с уведомлениями">!</span></button>

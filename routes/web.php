@@ -28,6 +28,7 @@ Route::middleware(['auth',\App\Http\Middleware\EnsureAccountSession::class])->gr
  Route::get('/transfer/export',[\App\Http\Controllers\DataTransferController::class,'export'])->middleware('throttle:6,1');
  Route::post('/transfer/preview',[\App\Http\Controllers\DataTransferController::class,'preview'])->middleware('throttle:10,1');
  Route::post('/transfer/import',[\App\Http\Controllers\DataTransferController::class,'import'])->middleware('throttle:6,1');
+ Route::put('/board-columns',[\App\Http\Controllers\BoardColumnsController::class,'save']);
  Route::get('/account',[\App\Http\Controllers\AccountController::class,'profile']);
  Route::patch('/account',[\App\Http\Controllers\AccountController::class,'update']);
  Route::put('/account/password',[\App\Http\Controllers\AccountController::class,'password'])->middleware('throttle:6,1');
@@ -71,7 +72,7 @@ Route::middleware(['auth',\App\Http\Middleware\EnsureAccountSession::class])->gr
  Route::get('/tasks/{task}/attachments/{attachment}',[TaskDetailsController::class,'download']);
  Route::delete('/tasks/{task}/attachments/{attachment}',[TaskDetailsController::class,'deleteFile']);
 
- Route::get('/data',function(Request $r){app(\App\Services\RecurringTasks::class)->generate($r->user()->id);return ['projects'=>Project::where('user_id',$r->user()->id)->whereNull('archived_at')->orderBy('id')->get(),'tasks'=>Task::where('user_id',$r->user()->id)->activeBoard()->orderBy('sort_order')->orderBy('id')->get()];});
+ Route::get('/data',function(Request $r){$columns=app(\App\Services\BoardColumns::class)->all($r->user()->id);app(\App\Services\RecurringTasks::class)->generate($r->user()->id);return ['columns'=>$columns,'projects'=>Project::where('user_id',$r->user()->id)->whereNull('archived_at')->orderBy('id')->get(),'tasks'=>Task::where('user_id',$r->user()->id)->activeBoard()->orderBy('sort_order')->orderBy('id')->get()];});
  Route::post('/projects',function(Request $r){$d=$r->validate(['name'=>'required|string|max:120']);return Project::create($d+['user_id'=>$r->user()->id]);});
  Route::post('/tasks',function(Request $r){
   $d=$r->validate(['title'=>'required|string|max:240','project_id'=>['nullable',Rule::exists('projects','id')->where('user_id',$r->user()->id)->whereNull('archived_at')],'due_date'=>'nullable|date_format:Y-m-d','planned_date'=>'nullable|date_format:Y-m-d']);
@@ -79,12 +80,12 @@ Route::middleware(['auth',\App\Http\Middleware\EnsureAccountSession::class])->gr
  });
  Route::post('/tasks/{task}/move',function(Request $r,Task $task){
   abort_unless($task->user_id===$r->user()->id,404);
-  $d=$r->validate(['status'=>['required',Rule::in(['todo','doing','done'])],'before_id'=>'nullable|integer|min:1']);
-  return ['tasks'=>app(TaskOrder::class)->move($r->user()->id,$task->id,$d['status'],isset($d['before_id'])?(int)$d['before_id']:null)];
+  $d=$r->validate(['status'=>['required_without:column',Rule::in(['todo','doing','done'])],'column'=>'nullable|string|max:40','before_id'=>'nullable|integer|min:1']);
+  return ['tasks'=>app(TaskOrder::class)->move($r->user()->id,$task->id,$d['status']??'todo',isset($d['before_id'])?(int)$d['before_id']:null,$d['column']??null)];
  });
  Route::patch('/tasks/{task}',function(Request $r,Task $task){
   abort_unless($task->user_id===$r->user()->id,404);
-  $d=$r->validate(['title'=>'sometimes|required|string|max:240','project_id'=>['nullable',Rule::exists('projects','id')->where('user_id',$r->user()->id)->whereNull('archived_at')],'description'=>'nullable|string|max:20000','status'=>['sometimes',Rule::in(['todo','doing','done'])],'priority'=>['sometimes',Rule::in(['normal','high'])],'due_date'=>'nullable|date_format:Y-m-d','planned_date'=>'nullable|date_format:Y-m-d','checklist'=>'sometimes|array|max:100','checklist.*'=>'required|array:text,done','checklist.*.text'=>'required|string|max:500','checklist.*.done'=>'required|boolean']);
+  $d=$r->validate(['title'=>'sometimes|required|string|max:240','project_id'=>['nullable',Rule::exists('projects','id')->where('user_id',$r->user()->id)->whereNull('archived_at')],'description'=>'nullable|string|max:20000','board_column'=>'sometimes|required|string|max:40','status'=>['sometimes',Rule::in(['todo','doing','done'])],'priority'=>['sometimes',Rule::in(['normal','high'])],'due_date'=>'nullable|date_format:Y-m-d','planned_date'=>'nullable|date_format:Y-m-d','checklist'=>'sometimes|array|max:100','checklist.*'=>'required|array:text,done','checklist.*.text'=>'required|string|max:500','checklist.*.done'=>'required|boolean']);
   return app(TaskOrder::class)->update($r->user()->id,$task->id,$d);
  });
  Route::delete('/tasks/{task}',function(Request $r,Task $task){abort_unless($task->user_id===$r->user()->id,404);app(TaskOrder::class)->delete($r->user()->id,$task->id);return response()->noContent();});

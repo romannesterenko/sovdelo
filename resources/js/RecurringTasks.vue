@@ -18,6 +18,7 @@ function edit(s:Series){source.value=null;editing.value={...s};frequency.value=s
 function save(){run(async()=>{if(editing.value)await api('/task-series/'+editing.value.id,'PATCH',{title:editing.value.title,description:editing.value.description,priority:editing.value.priority,frequency:frequency.value,next_date:next.value});else if(source.value)await api('/task-series','POST',{request_key:requestKey.value,task_id:source.value,frequency:frequency.value,next_date:next.value});await load();source.value=null;editing.value=null;emit('changed')})}
 function close(){if(busy.value)return;if(source.value||editing.value)confirmClose.value=true;else opened.value=false}
 function toggle(s:Series){run(async()=>{await api('/task-series/'+s.id,'PATCH',{active:!s.active});await load();emit('changed')})}
+defineExpose({open});
 </script>
 <template>
  <button class="repeat-button" :disabled="disabled" @click="open">↻ Повторяющиеся задачи</button>
