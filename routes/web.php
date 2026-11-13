@@ -29,6 +29,8 @@ Route::middleware(['auth',\App\Http\Middleware\EnsureAccountSession::class])->gr
  Route::post('/transfer/preview',[\App\Http\Controllers\DataTransferController::class,'preview'])->middleware('throttle:10,1');
  Route::post('/transfer/import',[\App\Http\Controllers\DataTransferController::class,'import'])->middleware('throttle:6,1');
  Route::put('/board-columns',[\App\Http\Controllers\BoardColumnsController::class,'save']);
+ Route::get('/account/api-devices',fn(Request $r)=>['items'=>app(\App\Services\ApiDevices::class)->listing($r->user())]);
+ Route::post('/account/api-devices/{device}/revoke',function(Request $r,int $device){$d=$r->validate(['current_password'=>'required|string|max:128']);app(\App\Services\ApiDevices::class)->revoke($r->user()->id,$device,$d['current_password']);return ['revoked'=>true];})->whereNumber('device')->middleware('throttle:6,1');
  Route::get('/account',[\App\Http\Controllers\AccountController::class,'profile']);
  Route::patch('/account',[\App\Http\Controllers\AccountController::class,'update']);
  Route::put('/account/password',[\App\Http\Controllers\AccountController::class,'password'])->middleware('throttle:6,1');

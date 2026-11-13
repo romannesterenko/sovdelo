@@ -554,4 +554,80 @@ class WorkspaceTest extends TestCase {
  public function test_start_timer_moves_custom_todo_to_default_working_column():void {
   $u=$this->account();$this->actingAs($u);$key=(string)\Illuminate\Support\Str::uuid();\App\Models\BoardColumn::create(['user_id'=>$u->id,'key'=>$key,'name'=>'Ожидание','kind'=>'todo','sort_order'=>4096]);$t=Task::create(['user_id'=>$u->id,'title'=>'Начать']);$this->postJson('/tasks/'.$t->id.'/move',['column'=>$key])->assertOk();$this->postJson('/tasks/'.$t->id.'/timer',['request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertOk();$this->assertDatabaseHas('tasks',['id'=>$t->id,'board_column'=>'doing','status'=>'doing']);
  }
+ private function deviceToken(User $u,bool $write=true):string {
+  $abilities=['workspace:read'];if($write)$abilities[]='workspace:write';$new=$u->createToken('Тестовое устройство',$abilities,now()->addDays(30));$new->accessToken->auth_version=$u->auth_version??0;$new->accessToken->save();return $new->plainTextToken;
+ }
+ private function apiCall(string $method,string $uri,?string $token=null,array $body=[],array $headers=[]){$this->app['auth']->forgetGuards();return $this->json($method,$uri,$body,($token?['Authorization'=>'Bearer '.$token]:[])+['Accept'=>'application/json']+$headers);}
+ public function test_api_device_login_issues_expiring_token_and_stores_only_hash():void {
+  $u=$this->account();$d=$this->apiCall('POST','/api/v1/auth/token',null,['email'=>'ONE@example.com','password'=>'example-password-123','device_name'=>'Android','access'=>'read'])->assertCreated()->assertJsonPath('data.access','read')->json('data');
+  $this->assertNotEmpty($d['token']);$this->assertNotEmpty($d['expires_at']);$stored=$u->tokens()->firstOrFail();$this->assertNotSame($d['token'],$stored->token);$this->assertSame(64,strlen($stored->token));$this->assertFalse($stored->can('workspace:write'));
+  $this->apiCall('GET','/api/v1/me',$d['token'])->assertOk()->assertJsonPath('data.email',$u->email)->assertJsonMissingPath('data.password');
+ }
+ public function test_api_requires_token_and_returns_uniform_errors():void {
+  $this->apiCall('GET','/api/v1/tasks')->assertUnauthorized()->assertJsonPath('error.code','unauthenticated')->assertJsonPath('meta.api_version','1');
+  $this->apiCall('GET','/api/v1/tasks','invalid-token')->assertUnauthorized();
+  $u=$this->account();$token=$this->deviceToken($u);$this->apiCall('GET','/api/v1/tasks?per_page=101',$token)->assertUnprocessable()->assertJsonPath('error.code','validation_failed')->assertJsonStructure(['error'=>['details'=>['per_page']]]);
+  $this->apiCall('GET','/api/v1/tasks/99999',$token)->assertNotFound()->assertJsonPath('error.code','not_found');
+ }
+ public function test_api_read_only_token_cannot_write_but_can_logout():void {
+  $u=$this->account();$token=$this->deviceToken($u,false);$this->apiCall('GET','/api/v1/projects',$token)->assertOk();
+  $this->apiCall('POST','/api/v1/projects',$token,['name'=>'Запрещено'])->assertForbidden()->assertJsonPath('error.code','forbidden');$this->assertDatabaseCount('projects',0);
+  $this->apiCall('DELETE','/api/v1/auth/token',$token)->assertOk();$this->apiCall('GET','/api/v1/me',$token)->assertUnauthorized();
+ }
+ public function test_api_expired_token_and_old_password_version_are_rejected():void {
+  $u=$this->account();$expired=$u->createToken('expired',['workspace:read'],now()->subMinute())->plainTextToken;$this->apiCall('GET','/api/v1/me',$expired)->assertUnauthorized();$token=$this->deviceToken($u);$u->auth_version=1;$u->save();$this->apiCall('GET','/api/v1/me',$token)->assertUnauthorized();
+ }
+ public function test_api_projects_create_retry_and_conflict_are_atomic():void {
+  $u=$this->account();$token=$this->deviceToken($u);$key=(string)\Illuminate\Support\Str::uuid();$headers=['Idempotency-Key'=>$key];
+  $id=$this->apiCall('POST','/api/v1/projects',$token,['name'=>'Проект'],$headers)->assertCreated()->json('data.id');$this->apiCall('POST','/api/v1/projects',$token,['name'=>'Проект'],$headers)->assertCreated()->assertJsonPath('data.id',$id);$this->assertDatabaseCount('projects',1);
+  $this->apiCall('POST','/api/v1/projects',$token,['name'=>'Иной'],$headers)->assertStatus(409)->assertJsonPath('error.code','conflict');$this->assertDatabaseCount('projects',1);
+  $this->apiCall('POST','/api/v1/projects',$token,['name'=>'Без ключа'])->assertUnprocessable();
+ }
+ public function test_api_owner_scope_applies_to_projects_tasks_and_devices():void {
+  $a=$this->account();$b=$this->account('api-other@example.com');$p=Project::create(['user_id'=>$a->id,'name'=>'Закрыто']);$t=Task::create(['user_id'=>$a->id,'project_id'=>$p->id,'title'=>'Закрыто']);$foreign=$a->createToken('device',['workspace:read'],now()->addDay());$token=$this->deviceToken($b);
+  $this->apiCall('GET','/api/v1/tasks',$token)->assertJsonCount(0,'data');$this->apiCall('GET','/api/v1/projects/'.$p->id,$token)->assertNotFound();$this->apiCall('GET','/api/v1/tasks/'.$t->id,$token)->assertNotFound();$this->apiCall('DELETE','/api/v1/tasks/'.$t->id,$token,['expected_version'=>1])->assertNotFound();
+  $this->apiCall('DELETE','/api/v1/auth/devices/'.$foreign->accessToken->id,$token,['current_password'=>'example-password-123'])->assertNotFound();$this->assertNotNull($foreign->accessToken->fresh());
+ }
+ public function test_api_task_create_preserves_checklist_and_custom_column():void {
+  $u=$this->account();$token=$this->deviceToken($u);$key=(string)\Illuminate\Support\Str::uuid();\App\Models\BoardColumn::create(['user_id'=>$u->id,'key'=>$key,'name'=>'Проверка','kind'=>'doing','sort_order'=>4096]);
+  $body=['title'=>'Задача API','column'=>$key,'description'=>'Описание','planned_date'=>'2026-11-20','checklist'=>[['text'=>'Пункт','done'=>false]]];$headers=['Idempotency-Key'=>(string)\Illuminate\Support\Str::uuid()];
+  $d=$this->apiCall('POST','/api/v1/tasks',$token,$body,$headers)->assertCreated()->assertJsonPath('data.column',$key)->assertJsonPath('data.status','doing')->assertJsonPath('data.checklist.0.done',false)->json('data');
+  $this->apiCall('POST','/api/v1/tasks',$token,$body,$headers)->assertCreated()->assertJsonPath('data.id',$d['id']);$this->assertDatabaseCount('tasks',1);
+ }
+ public function test_api_stale_version_cannot_overwrite_web_changes():void {
+  $u=$this->account();$token=$this->deviceToken($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Начало']);$v=$this->apiCall('GET','/api/v1/tasks/'.$t->id,$token)->assertOk()->json('data.version');
+  app(\App\Services\TaskOrder::class)->update($u->id,$t->id,['title'=>'Изменено на сайте']);
+  $this->apiCall('PATCH','/api/v1/tasks/'.$t->id,$token,['title'=>'Устарело','expected_version'=>$v])->assertStatus(409);$this->assertSame('Изменено на сайте',$t->fresh()->title);
+  $fresh=$t->fresh();$this->apiCall('PATCH','/api/v1/tasks/'.$t->id,$token,['title'=>'Свежий запрос','expected_version'=>$fresh->version])->assertOk()->assertJsonPath('data.title','Свежий запрос');
+ }
+ public function test_api_move_into_populated_column_checks_version_and_anchor():void {
+  $u=$this->account();$token=$this->deviceToken($u);$a=Task::create(['user_id'=>$u->id,'title'=>'A']);$b=Task::create(['user_id'=>$u->id,'title'=>'B','status'=>'doing']);
+  $this->apiCall('POST','/api/v1/tasks/'.$a->id.'/move',$token,['column'=>'doing','before_id'=>$b->id,'expected_version'=>$a->version])->assertOk()->assertJsonPath('data.column','doing');
+  $this->assertSame([$a->id,$b->id],Task::where('user_id',$u->id)->where('board_column','doing')->orderBy('sort_order')->pluck('id')->all());$this->assertGreaterThan(1,$b->fresh()->version);
+  $this->apiCall('POST','/api/v1/tasks/'.$a->id.'/move',$token,['column'=>'done','expected_version'=>1])->assertStatus(409);
+ }
+ public function test_api_archive_trash_restore_and_filters():void {
+  $u=$this->account();$token=$this->deviceToken($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Архив']);$this->apiCall('POST','/api/v1/tasks/'.$t->id.'/archive',$token,['expected_version'=>$t->version])->assertOk();$this->apiCall('GET','/api/v1/tasks',$token)->assertJsonCount(0,'data');$this->apiCall('GET','/api/v1/tasks?state=archived',$token)->assertJsonCount(1,'data');
+  $this->apiCall('DELETE','/api/v1/tasks/'.$t->id,$token,['expected_version'=>$t->fresh()->version])->assertOk();$this->apiCall('GET','/api/v1/tasks?state=trashed',$token)->assertJsonCount(1,'data');
+  $version=Task::withTrashed()->findOrFail($t->id)->version;$this->apiCall('POST','/api/v1/tasks/'.$t->id.'/restore',$token,['expected_version'=>$version])->assertOk()->assertJsonPath('data.deleted_at',null);$this->apiCall('GET','/api/v1/tasks',$token)->assertJsonCount(1,'data');
+ }
+ public function test_api_pagination_and_filter_contract():void {
+  $u=$this->account();$token=$this->deviceToken($u);for($i=0;$i<5;$i++)Task::create(['user_id'=>$u->id,'title'=>'Тест '.$i]);
+  $this->apiCall('GET','/api/v1/tasks?per_page=2&page=2',$token)->assertJsonCount(2,'data')->assertJsonPath('meta.page',2)->assertJsonPath('meta.total',5)->assertJsonPath('meta.last_page',3);
+  $this->apiCall('GET','/api/v1/tasks?q=Тест%202',$token)->assertJsonCount(1,'data');
+ }
+ public function test_api_timer_uses_same_single_active_timer_and_paginated_history():void {
+  $u=$this->account();$token=$this->deviceToken($u);$a=Task::create(['user_id'=>$u->id,'title'=>'A']);$b=Task::create(['user_id'=>$u->id,'title'=>'B']);
+  $this->apiCall('POST','/api/v1/tasks/'.$a->id.'/timer',$token,['request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertOk();$d=$this->apiCall('POST','/api/v1/tasks/'.$b->id.'/timer',$token,['request_key'=>(string)\Illuminate\Support\Str::uuid()])->assertOk()->assertJsonPath('data.active.task_id',$b->id)->json('data');
+  $this->assertSame(1,\App\Models\TimeSession::where('user_id',$u->id)->whereNull('ended_at')->count());$this->apiCall('POST','/api/v1/timer/'.$d['active']['id'].'/stop',$token,['reason'=>'stop'])->assertOk()->assertJsonPath('data.active',null);$this->apiCall('GET','/api/v1/tasks/'.$b->id.'/time?per_page=1',$token)->assertOk()->assertJsonCount(1,'data')->assertJsonPath('meta.total',1);
+ }
+ public function test_api_device_can_be_revoked_from_web_profile_without_exposing_token():void {
+  $u=$this->account();$token=$this->deviceToken($u);$id=$u->tokens()->firstOrFail()->id;$this->actingAs($u,'web')->getJson('/account/api-devices')->assertOk()->assertJsonPath('items.0.name','Тестовое устройство')->assertJsonMissingPath('items.0.token');
+  $this->postJson('/account/api-devices/'.$id.'/revoke',['current_password'=>'wrong'])->assertUnprocessable();$this->postJson('/account/api-devices/'.$id.'/revoke',['current_password'=>'example-password-123'])->assertOk();$this->apiCall('GET','/api/v1/me',$token)->assertUnauthorized();
+ }
+ public function test_api_login_rate_limit_and_wrong_password_are_generic():void {
+  $this->account();$body=['email'=>'one@example.com','password'=>'wrong','device_name'=>'Тест','access'=>'read'];
+  for($i=0;$i<6;$i++)$this->apiCall('POST','/api/v1/auth/token',null,$body)->assertUnprocessable()->assertJsonPath('error.code','validation_failed');
+  $this->apiCall('POST','/api/v1/auth/token',null,$body)->assertStatus(429)->assertJsonPath('error.code','rate_limited');
+ }
 }

@@ -31,7 +31,7 @@ class TaskOrder
    else $index=count($ids);
    array_splice($ids,$index,0,[$id]);if($status==='done')app(TaskTimer::class)->closeTask($userId,$id,'completed');
    // One order per user/column; project filters preserve the relative order of hidden tasks.
-   foreach($ids as $position=>$taskId){$values=['sort_order'=>($position+1)*1024];if($taskId===$id){$values['status']=$status;$values['board_column']=$column;}Task::where('user_id',$userId)->whereKey($taskId)->update($values);}
+   foreach($ids as $position=>$taskId){$values=['sort_order'=>($position+1)*1024,'version'=>DB::raw('version + 1')];if($taskId===$id){$values['status']=$status;$values['board_column']=$column;}Task::where('user_id',$userId)->whereKey($taskId)->update($values);}
    return Task::where('user_id',$userId)->activeBoard()->orderBy('sort_order')->orderBy('id')->get()->all();
   });
  }

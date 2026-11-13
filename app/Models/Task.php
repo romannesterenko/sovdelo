@@ -11,7 +11,12 @@ class Task extends Model {
  public function labels(){return $this->belongsToMany(Label::class,'task_label');}
  public function comments(){return $this->hasMany(TaskComment::class);}
  public function attachments(){return $this->hasMany(TaskAttachment::class);}
- protected static function booted():void {static::creating(function($model){if(!$model->board_column)$model->board_column=$model->status?:'todo';if(!$model->transfer_uuid)$model->transfer_uuid=(string)\Illuminate\Support\Str::uuid();});}
+ protected static function booted():void {
+  static::creating(function($m){$m->version=1;if(!$m->board_column)$m->board_column=$m->status?:'todo';if(!$m->transfer_uuid)$m->transfer_uuid=(string)\Illuminate\Support\Str::uuid();});
+  static::updating(function($m){$m->version=(int)$m->version+1;});
+  static::deleting(function($m){\Illuminate\Support\Facades\DB::table('tasks')->where('id',$m->id)->increment('version');});
+ }
+
  protected $fillable=['user_id','project_id','title','description','status','priority','due_date','planned_date','checklist'];
- protected function casts(): array {return ['remind_at'=>'immutable_datetime','checklist'=>'array','user_id'=>'integer','project_id'=>'integer','sort_order'=>'integer','archived_at'=>'datetime'];}
+ protected function casts(): array {return ['version'=>'integer','remind_at'=>'immutable_datetime','checklist'=>'array','user_id'=>'integer','project_id'=>'integer','sort_order'=>'integer','archived_at'=>'datetime'];}
 }
