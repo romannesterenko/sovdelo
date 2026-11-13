@@ -1,0 +1,3 @@
+.scaffold.*/
+__pycache__/
+# Native generated projects and pubspec.lock in app/ are intentionally committed.
