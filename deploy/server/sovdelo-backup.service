@@ -1,0 +1,9 @@
+[Unit]
+Description=SovDelo consistent database and files backup
+After=postgresql.service
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/bin/bash /usr/local/lib/sovdelo/backup-now.sh
+TimeoutStartSec=30min

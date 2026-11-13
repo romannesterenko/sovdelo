@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily SovDelo backup at 03:20 Moscow
+[Timer]
+OnCalendar=*-*-* 03:20:00 Europe/Moscow
+Persistent=true
+Unit=sovdelo-backup.service
+[Install]
+WantedBy=timers.target

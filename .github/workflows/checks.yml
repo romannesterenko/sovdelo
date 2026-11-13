@@ -70,7 +70,7 @@ jobs:
           npm ci --include=dev --ignore-scripts --no-audit --no-fund
       - name: Check shell scripts and tracked files
         run: |
-          for file in setup.sh test.sh scripts/*.sh deploy/*.sh deploy/server/*.sh; do bash -n "$file"; done
+          for file in setup.sh test.sh scripts/*.sh deploy/*.sh deploy/server/*.sh deploy/local/*.sh; do bash -n "$file"; done
           bash scripts/check-git.sh
       - name: Deployment archive validation tests
         run: python3 -m unittest discover -s deploy/tests -p 'test_*.py'
