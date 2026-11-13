@@ -26,3 +26,5 @@ void main() {
     }
   });
 }
+
+// Each test uses its own physical file to cover restart and migration semantics.

@@ -42,6 +42,7 @@ class _ProbePageState extends State<ProbePage> {
   final vault = const FlutterSecureStorage();
   final notifications = FlutterLocalNotificationsPlugin();
   String message = 'Открываем локальную базу…';
+  int pendingCount = 0;
   bool busy = true;
   bool readyNotifications = false;
   static const vaultKey = 'sovdelo.probe.marker';
@@ -61,7 +62,8 @@ class _ProbePageState extends State<ProbePage> {
         p.join(directory.path, 'probe.sqlite3'),
       );
       tasks = await store!.list();
-      message = 'SQLite готова. Добавь задачу и перезапусти приложение.';
+      pendingCount = await store!.pendingCount();
+      message = 'Локальная база готова. Изменения сохраняются вместе с очередью.';
     } catch (e) {
       message = 'Не удалось открыть базу: $e';
     }
@@ -72,6 +74,7 @@ class _ProbePageState extends State<ProbePage> {
     setState(() => busy = true);
     try {
       final result = await operation();
+      if (store != null) pendingCount = await store!.pendingCount();
       if (mounted) setState(() => message = result);
     } catch (e) {
       if (mounted) setState(() => message = 'Проверка не прошла: $e');
@@ -155,12 +158,12 @@ class _ProbePageState extends State<ProbePage> {
         label: const Text('Показать уведомление'),
       ),
       const SizedBox(height: 16),
-      const Text('Синхронизацию и вход добавим после проверки основы. Эти задачи хранятся только на устройстве.'),
+      Text('В очереди: $pendingCount изменений.\nВход и отправка на сервер будут следующим этапом. Сейчас данные остаются на этом устройстве.'),
     ]);
     final editor = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Text('Мои задачи · офлайн', style: Theme.of(context).textTheme.headlineSmall),
       const SizedBox(height: 16),
-      TextField(controller: title, maxLength: 200,
+      TextField(controller: title, maxLength: 240,
           decoration: const InputDecoration(labelText: 'Новая задача', border: OutlineInputBorder())),
       FilledButton.icon(
         onPressed: busy || store == null ? null : () => action(() async {
@@ -168,7 +171,7 @@ class _ProbePageState extends State<ProbePage> {
           title.clear();
           final loaded = await store!.list();
           if (mounted) setState(() => tasks = loaded);
-          return 'Сохранено в SQLite на устройстве.';
+          return 'Задача и операция очереди сохранены одной транзакцией.';
         }),
         icon: const Icon(Icons.add), label: const Text('Добавить задачу'),
       ),
@@ -178,6 +181,7 @@ class _ProbePageState extends State<ProbePage> {
         Card(child: CheckboxListTile(
           value: task['done'] == 1,
           title: Text(task['title'] as String),
+          subtitle: Text('Локальная версия ${task['local_revision']} · ожидает подключения синхронизации'),
           onChanged: busy ? null : (value) => action(() async {
             await store!.toggle(task['id'] as int, value ?? false);
             final loaded = await store!.list();
@@ -188,7 +192,7 @@ class _ProbePageState extends State<ProbePage> {
     ]);
     return Scaffold(
       appBar: AppBar(title: const Text('СовДело'), actions: const [
-        Padding(padding: EdgeInsets.all(16), child: Text('SD-017 · прототип')),
+        Padding(padding: EdgeInsets.all(16), child: Text('Офлайн · этап 20')),
       ]),
       body: LayoutBuilder(builder: (context, constraints) => SingleChildScrollView(
         padding: const EdgeInsets.all(24),
