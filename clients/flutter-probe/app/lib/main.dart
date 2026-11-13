@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart' as native;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart' as ffi;
 import 'store.dart';
+import 'server_page.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -158,7 +159,12 @@ class _ProbePageState extends State<ProbePage> {
         label: const Text('Показать уведомление'),
       ),
       const SizedBox(height: 16),
-      Text('В очереди: $pendingCount изменений.\nВход и отправка на сервер будут следующим этапом. Сейчас данные остаются на этом устройстве.'),
+      Text('В очереди: $pendingCount локальных изменений. Они пока не отправляются на сайт.'),
+      const SizedBox(height: 16),
+      FilledButton.icon(
+        onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const ServerPage())),
+        icon: const Icon(Icons.account_circle_outlined), label: const Text('Открыть аккаунт СовДела'),
+      ),
     ]);
     final editor = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Text('Мои задачи · офлайн', style: Theme.of(context).textTheme.headlineSmall),
@@ -192,7 +198,7 @@ class _ProbePageState extends State<ProbePage> {
     ]);
     return Scaffold(
       appBar: AppBar(title: const Text('СовДело'), actions: const [
-        Padding(padding: EdgeInsets.all(16), child: Text('Офлайн · этап 20')),
+        Padding(padding: EdgeInsets.all(16), child: Text('Локальные задачи')),
       ]),
       body: LayoutBuilder(builder: (context, constraints) => SingleChildScrollView(
         padding: const EdgeInsets.all(24),
