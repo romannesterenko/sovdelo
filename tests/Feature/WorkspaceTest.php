@@ -630,4 +630,49 @@ class WorkspaceTest extends TestCase {
   for($i=0;$i<6;$i++)$this->apiCall('POST','/api/v1/auth/token',null,$body)->assertUnprocessable()->assertJsonPath('error.code','validation_failed');
   $this->apiCall('POST','/api/v1/auth/token',null,$body)->assertStatus(429)->assertJsonPath('error.code','rate_limited');
  }
+ public function test_sync_create_receipt_prevents_duplicate_after_lost_response():void {
+  $u=$this->account();$token=$this->deviceToken($u);$key=(string)\Illuminate\Support\Str::uuid();
+  $body=['operation_uuid'=>$key,'kind'=>'create','title'=>'Офлайн задача'];
+  $first=$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertCreated()->assertJsonPath('data.task.uuid',$key)->json('data');
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertCreated()->assertExactJson(['data'=>$first,'meta'=>['api_version'=>'1']]);
+  $this->assertDatabaseCount('tasks',1);$this->assertDatabaseCount('api_requests',1);
+  $body['title']='Другое содержимое';$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertConflict();
+  $this->assertDatabaseHas('tasks',['title'=>'Офлайн задача']);
+ }
+ public function test_sync_status_retry_returns_original_receipt_after_later_web_change():void {
+  $u=$this->account();$token=$this->deviceToken($u);$task=Task::create(['user_id'=>$u->id,'title'=>'Статус']);
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'status','task_id'=>$task->id,'expected_version'=>$task->version,'status'=>'done'];
+  $first=$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertOk()->assertJsonPath('data.task.status','done')->json('data');
+  app(\App\Services\TaskOrder::class)->update($u->id,$task->id,['status'=>'doing']);
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertOk()->assertExactJson(['data'=>$first,'meta'=>['api_version'=>'1']]);
+  $this->assertSame('doing',$task->fresh()->status);
+ }
+ public function test_sync_conflict_preserves_server_and_does_not_acknowledge():void {
+  $u=$this->account();$token=$this->deviceToken($u);$task=Task::create(['user_id'=>$u->id,'title'=>'Конфликт']);
+  $old=$task->version;app(\App\Services\TaskOrder::class)->update($u->id,$task->id,['status'=>'doing']);
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'status','task_id'=>$task->id,'expected_version'=>$old,'status'=>'done'];
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertConflict();
+  $this->assertSame('doing',$task->fresh()->status);$this->assertDatabaseCount('api_requests',0);
+ }
+ public function test_sync_scopes_tasks_and_receipts_to_owner_and_requires_write():void {
+  $a=$this->account();$b=$this->account('sync-other@example.com');$task=Task::create(['user_id'=>$a->id,'title'=>'Чужая']);
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'status','task_id'=>$task->id,'expected_version'=>$task->version,'status'=>'done'];
+  $this->apiCall('POST','/api/v1/sync/operations',$this->deviceToken($b),$body)->assertNotFound();
+  $this->apiCall('POST','/api/v1/sync/operations',$this->deviceToken($a,false),$body)->assertForbidden();
+  $this->apiCall('GET','/api/v1/sync/tasks',$this->deviceToken($b))->assertOk()->assertJsonCount(0,'data');
+ }
+ public function test_sync_id_cursor_includes_tombstones_and_stays_within_high_watermark():void {
+  $u=$this->account();$token=$this->deviceToken($u);$ids=[];
+  for($i=0;$i<22;$i++)$ids[]=Task::create(['user_id'=>$u->id,'title'=>'Задача '.$i])->id;
+  Task::findOrFail($ids[1])->delete();
+  $first=$this->apiCall('GET','/api/v1/sync/tasks',$token)->assertOk()->assertJsonCount(20,'data')->assertJsonPath('meta.has_more',true)->assertJsonPath('data.1.active',false)->json();
+  Task::create(['user_id'=>$u->id,'title'=>'После начала обхода']);
+  $this->apiCall('GET','/api/v1/sync/tasks?after_id='.$first['meta']['after_id'].'&through_id='.$first['meta']['through_id'],$token)->assertOk()->assertJsonCount(2,'data')->assertJsonPath('meta.has_more',false);
+ }
+ public function test_sync_archived_task_cannot_be_changed_and_me_exposes_access():void {
+  $u=$this->account();$token=$this->deviceToken($u);$task=Task::create(['user_id'=>$u->id,'title'=>'Архив']);$task->archived_at=now();$task->save();
+  $this->apiCall('POST','/api/v1/sync/operations',$token,['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'status','task_id'=>$task->id,'expected_version'=>$task->version,'status'=>'done'])->assertUnprocessable();
+  $this->apiCall('GET','/api/v1/me',$token)->assertOk()->assertJsonPath('data.access','write');
+  $this->apiCall('GET','/api/v1/me',$this->deviceToken($u,false))->assertOk()->assertJsonPath('data.access','read');
+ }
 }

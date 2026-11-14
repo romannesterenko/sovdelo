@@ -1,11 +1,13 @@
 <?php
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\Api\{AuthController,WorkspaceController};
+use App\Http\Controllers\Api\{AuthController,WorkspaceController,SyncController};
 use App\Http\Middleware\ApiAccess;
 use Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful;
 Route::prefix('v1')->withoutMiddleware(EnsureFrontendRequestsAreStateful::class)->group(function(){
  Route::post('/auth/token',[AuthController::class,'login'])->middleware('throttle:api-login');
  Route::middleware(['auth:sanctum',ApiAccess::class,'throttle:workspace-api'])->group(function(){
+  Route::get('/sync/tasks',[SyncController::class,'tasks']);
+  Route::post('/sync/operations',[SyncController::class,'operation']);
   Route::get('/me',[AuthController::class,'me']);
   Route::delete('/auth/token',[AuthController::class,'logout']);
   Route::get('/auth/devices',[AuthController::class,'devices']);

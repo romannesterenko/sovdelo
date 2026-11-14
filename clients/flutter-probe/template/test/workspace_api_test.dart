@@ -16,7 +16,7 @@ class MemoryVault implements TokenVault {
 }
 
 void main() {
-  test('Вход запрашивает read-токен и сохраняет после проверки профиля', () async {
+  test('Вход запрашивает write-токен и сохраняет после проверки профиля', () async {
     final vault = MemoryVault();
     final calls = <String>[];
     final api = WorkspaceApi(transport: (method, path, token, body) async {
@@ -24,7 +24,7 @@ void main() {
       if (path == 'auth/token') {
         expect(token, isNull);
         final input = body!;
-        expect(input['access'], 'read');
+        expect(input['access'], 'write');
         expect(input['email'], 'user@example.com');
         expect(input['password'], 'pass');
         return {'data': {'token': 'fake-device-token'}};

@@ -1,0 +1,5 @@
+{
+  "lib/workspace_api.dart": "7c7f9d265dda52009cf0c073fbaec343f2ddd26c2df3ff96c9185fb3bb535dce",
+  "lib/server_page.dart": "2c799b41376037c89b8423168cbbe8878c44ccc0356aa1d01b9d18214bceb3cb",
+  "test/workspace_api_test.dart": "c2cc92f8fb1ab93f911a80ff9635437eae235b7fab70973f56974149aa2538fb"
+}

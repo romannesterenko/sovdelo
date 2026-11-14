@@ -37,7 +37,7 @@ class WorkspaceApi {
         }
         final bytes = <int>[];
         await for (final chunk in response) {
-          if (bytes.length + chunk.length > 2 * 1024 * 1024) {
+          if (bytes.length + chunk.length > 8 * 1024 * 1024) {
             throw const ApiFailure(0, 'Ответ сервера слишком большой.');
           }
           bytes.addAll(chunk);
@@ -82,7 +82,7 @@ class WorkspaceApi {
     final response = await _transport('POST', 'auth/token', null, {
       'email': email.trim(), 'password': password,
       'device_name': 'СовДело · ${Platform.isAndroid ? 'Android' : 'Desktop'}',
-      'access': 'read',
+      'access': 'write',
     });
     final data = response['data'];
     if (data is! Map || data['token'] is! String || (data['token'] as String).isEmpty) {
@@ -108,6 +108,27 @@ class WorkspaceApi {
       throw const ApiFailure(0, 'Некорректный список API.');
     }
     return response;
+  }
+
+  Future<Map<String, dynamic>> scan(String token, int after, int? through) async {
+    final query = 'sync/tasks?after_id=$after${through == null ? '' : '&through_id=$through'}';
+    final response = await _transport('GET', query, token, null);
+    if (response['data'] is! List || response['meta'] is! Map) {
+      throw const ApiFailure(0, 'Некорректный ответ синхронизации.');
+    }
+    return response;
+  }
+
+  Future<Map<String, dynamic>> operation(String token, Map<String, dynamic> body) async {
+    final data = (await _transport('POST', 'sync/operations', token, body))['data'];
+    if (data is! Map) throw const ApiFailure(0, 'Нет подтверждения операции.');
+    return Map<String, dynamic>.from(data);
+  }
+
+  Future<Map<String, dynamic>> task(String token, int id) async {
+    final data = (await _transport('GET', 'tasks/$id', token, null))['data'];
+    if (data is! Map) throw const ApiFailure(0, 'Некорректная задача.');
+    return Map<String, dynamic>.from(data);
   }
 
   Future<void> revoke(String token) async {

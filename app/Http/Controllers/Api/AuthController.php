@@ -17,7 +17,7 @@ class AuthController {
    return ApiData::response(['token'=>$new->plainTextToken,'token_type'=>'Bearer','expires_at'=>$expires->toIso8601String(),'access'=>$d['access']],201);
   });
  }
- public function me(Request $r){$u=$r->user();return ApiData::response(['id'=>$u->id,'name'=>$u->name,'email'=>$u->email,'timezone'=>$u->timezone,'theme'=>$u->theme]);}
+ public function me(Request $r){$u=$r->user();return ApiData::response(['id'=>$u->id,'name'=>$u->name,'email'=>$u->email,'timezone'=>$u->timezone,'theme'=>$u->theme,'access'=>$u->currentAccessToken()->can('workspace:write')?'write':'read']);}
  public function logout(Request $r){$r->user()->currentAccessToken()->delete();return ApiData::response(['revoked'=>true]);}
  public function devices(Request $r,ApiDevices $service){return ApiData::response($service->listing($r->user()));}
  public function revoke(Request $r,int $device,ApiDevices $service){abort_unless($r->user()->currentAccessToken()->can('workspace:write'),403,'Недостаточно прав.');$d=$r->validate(['current_password'=>'required|string|max:128']);$service->revoke($r->user()->id,$device,$d['current_password']);return ApiData::response(['revoked'=>true]);}
