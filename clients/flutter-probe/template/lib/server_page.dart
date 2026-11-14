@@ -9,6 +9,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart' as ffi;
 import 'workspace_api.dart';
 import 'account_store.dart';
 import 'account_sync.dart';
+import 'task_editor.dart';
 
 class SecureTokenVault implements TokenVault {
   final storage = const FlutterSecureStorage();
@@ -172,8 +173,14 @@ class _ServerPageState extends State<ServerPage> {
     if (!mounted) return;
     final accept = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
       title: const Text('Конфликт изменений'),
-      content: Text('На устройстве: ${local['status']}\nНа сайте: ${remote['status']}\n\n'
-          'Принять версию сайта и удалить ожидающие изменения этой задачи?'),
+      content: SizedBox(width: 640, child: SingleChildScrollView(child: Text(
+          'НА УСТРОЙСТВЕ\n${local['title']} · ${local['status']}\n'
+          'Проект: ${local['project_id'] ?? 'без проекта'} · срок: ${local['due_date'] ?? 'нет'}\n'
+          'Приоритет: ${local['priority']}\n${local['description'] ?? ''}\n\n'
+          'НА САЙТЕ\n${remote['title']} · ${remote['status']}\n'
+          'Проект: ${remote['project_id'] ?? 'без проекта'} · срок: ${remote['due_date'] ?? 'нет'}\n'
+          'Приоритет: ${remote['priority']}\n${remote['description'] ?? ''}\n\n'
+          'Принять все поля версии сайта и удалить ожидающие изменения этой задачи?'))),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Оставить конфликт')),
         FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Принять сайт')),
@@ -185,23 +192,29 @@ class _ServerPageState extends State<ServerPage> {
     }
   });
   Future<void> showProjects() => perform(() async {
-    final rows = <Map<String, dynamic>>[];
-    var number = 1;
-    while (true) {
-      final result = await api.page(token!, 'projects', number);
-      rows.addAll((result['data'] as List).map((r) => Map<String, dynamic>.from(r as Map)));
-      if (number >= (result['meta'] as Map)['last_page']) break;
-      number++;
-    }
+    final rows = await store?.projects() ?? <Map<String, Object?>>[];
     if (!mounted) return;
     await showDialog<void>(context: context, builder: (context) => AlertDialog(
-      title: const Text('Активные проекты'),
+      title: const Text('Проекты · локальная копия'),
       content: SizedBox(width: 560, child: SingleChildScrollView(child: Column(
         mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: rows.isEmpty ? [const Text('Проектов пока нет.')] : [for (final row in rows) ListTile(title: Text(row['name'] as String))],
+        children: rows.isEmpty ? [const Text('Проектов нет. При наличии сети нажми «Синхронизировать».')]
+            : [for (final row in rows) ListTile(title: Text(row['name'] as String))],
       ))),
       actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Закрыть'))],
     ));
+  });
+
+  Future<void> editTask(Map<String, Object?> task) => perform(() async {
+    final projects = await store!.projects();
+    if (!mounted) return;
+    final fields = await showDialog<Map<String, Object?>>(context: context,
+      builder: (_) => TaskEditor(task: task, projects: projects));
+    if (fields == null) return;
+    await store!.edit(task['local_id'] as String, fields);
+    await reload();
+    message = 'Правки сохранены на устройстве.';
+    await synchronize();
   });
 
   void showDetails(Map<String, dynamic> task) {
@@ -277,6 +290,8 @@ class _ServerPageState extends State<ServerPage> {
             for (final task in items) Card(child: Padding(padding: const EdgeInsets.all(12), child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                 Text(task['title'] as String, style: Theme.of(context).textTheme.titleMedium),
+                if (task['due_date'] != null) Text('Срок: ${task['due_date']}'),
+                if (task['priority'] == 'high') const Text('Высокий приоритет'),
                 Text(task['blocked'] == 1 ? 'Конфликт: ${task['error']}'
                     : (task['pending'] as int) > 0 ? 'Сохранено на устройстве · ожидает отправки' : 'Сохранено на сайте'),
                 Wrap(spacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
@@ -287,6 +302,8 @@ class _ServerPageState extends State<ServerPage> {
                       DropdownMenuItem(value: 'done', child: Text('Готово')),
                     ], onChanged: busy || !canWrite || task['blocked'] == 1 ? null
                         : (status) { if (status != null) editStatus(task, status); }),
+                  TextButton(onPressed: busy || !canWrite || task['blocked'] == 1 ? null : () => editTask(task),
+                    child: const Text('Редактировать')),
                   if (task['remote_json'] != null) TextButton(
                     onPressed: () => showDetails(Map<String, dynamic>.from(jsonDecode(task['remote_json'] as String) as Map)),
                     child: const Text('Детали с сайта')),
@@ -297,7 +314,7 @@ class _ServerPageState extends State<ServerPage> {
             ))),
           ],
           const SizedBox(height: 24),
-          const Text('Тестовые задачи на предыдущем экране остаются отдельно. Новые задачи здесь создаются без проекта. '
+          const Text('Тестовые задачи на предыдущем экране остаются отдельно. Проект можно выбрать в редакторе задачи. '
               'Отправка выполняется при изменении и по кнопке, пока экран открыт; фоновой синхронизации пока нет.'),
         ],
       )),

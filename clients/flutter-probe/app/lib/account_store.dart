@@ -14,7 +14,7 @@ class AccountStore {
   final Database db;
   AccountStore(this.db);
   static Future<AccountStore> open(DatabaseFactory factory, String path) async {
-    final db = await factory.openDatabase(path, options: OpenDatabaseOptions(version: 1, onCreate: (db, version) async {
+    final db = await factory.openDatabase(path, options: OpenDatabaseOptions(version: 2, onCreate: (db, version) async {
       await db.execute('CREATE TABLE account_tasks ('
           'local_id TEXT PRIMARY KEY, server_id INTEGER UNIQUE, server_version INTEGER, '
           'title TEXT NOT NULL, status TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, remote_json TEXT)');
@@ -23,8 +23,63 @@ class AccountStore {
           'local_id TEXT NOT NULL, kind TEXT NOT NULL, title TEXT, status TEXT, '
           'body TEXT, blocked INTEGER NOT NULL DEFAULT 0, error TEXT)');
       await db.execute('CREATE INDEX queue_task ON account_queue(local_id, sequence)');
+      await _addDetails(db);
+    }, onUpgrade: (db, old, version) async {
+      if (old < 2) await _addDetails(db);
     }));
     return AccountStore(db);
+  }
+
+  static Map<String, Object?> _details(Map<String, dynamic> task) => {
+    'description': task['description'], 'due_date': task['due_date'],
+    'priority': task['priority'] ?? 'normal', 'project_id': task['project_id'],
+  };
+
+  static Future<void> _addDetails(DatabaseExecutor db) async {
+    await db.execute('ALTER TABLE account_tasks ADD COLUMN description TEXT');
+    await db.execute('ALTER TABLE account_tasks ADD COLUMN due_date TEXT');
+    await db.execute("ALTER TABLE account_tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'");
+    await db.execute('ALTER TABLE account_tasks ADD COLUMN project_id INTEGER');
+    await db.execute('ALTER TABLE account_queue ADD COLUMN fields TEXT');
+    await db.execute('CREATE TABLE account_projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');
+    for (final row in await db.query('account_tasks', where: 'remote_json IS NOT NULL')) {
+      final remote = Map<String, dynamic>.from(jsonDecode(row['remote_json'] as String) as Map);
+      await db.update('account_tasks', _details(remote), where: 'local_id=?', whereArgs: [row['local_id']]);
+    }
+  }
+
+  Future<List<Map<String, Object?>>> projects() => db.query('account_projects', orderBy: 'name, id');
+
+  Future<void> edit(String id, Map<String, Object?> fields) async {
+    const allowed = {'title', 'description', 'due_date', 'priority', 'project_id'};
+    if (fields.keys.any((key) => !allowed.contains(key))) throw ArgumentError('Неизвестное поле');
+    if (fields.containsKey('title') &&
+        (fields['title'] is! String || (fields['title'] as String).trim().isEmpty || (fields['title'] as String).length > 240)) {
+      throw ArgumentError('Название: от 1 до 240 символов');
+    }
+    if (fields['description'] != null &&
+        (fields['description'] is! String || (fields['description'] as String).length > 20000)) {
+      throw ArgumentError('Описание: не более 20000 символов');
+    }
+    if (fields.containsKey('priority') && !['normal', 'high'].contains(fields['priority'])) throw ArgumentError('Неизвестный приоритет');
+    if (fields['project_id'] != null && (fields['project_id'] is! int || (fields['project_id'] as int) <= 0)) throw ArgumentError('Некорректный проект');
+    if (fields['due_date'] != null) {
+      final value = fields['due_date'];
+      final date = value is String ? DateTime.tryParse(value) : null;
+      if (date == null || date.year < 1 || date.year > 9999 || date.toIso8601String().substring(0, 10) != value) throw ArgumentError('Некорректная дата');
+    }
+    await db.transaction((tx) async {
+      final row = (await tx.query('account_tasks', where: 'local_id=?', whereArgs: [id])).single;
+      final changed = <String, Object?>{};
+      for (final field in fields.entries) {
+        final value = field.key == 'title' ? (field.value as String).trim() : field.value;
+        if (row[field.key] != value) changed[field.key] = value;
+      }
+      if (changed.isEmpty) return;
+      await tx.update('account_tasks', changed, where: 'local_id=?', whereArgs: [id]);
+      await tx.insert('account_queue', {'operation_uuid': operationUuid(), 'local_id': id,
+        'kind': 'edit', 'fields': jsonEncode(changed)});
+    });
   }
 
   Future<List<Map<String, Object?>>> tasks() => db.rawQuery('''
@@ -72,7 +127,12 @@ class AccountStore {
       body['title'] = row['title'];
     } else {
       if (task['server_id'] == null || task['server_version'] == null) throw StateError('Нет серверной версии');
-      body.addAll({'task_id': task['server_id'], 'expected_version': task['server_version'], 'status': row['status']});
+      body.addAll({'task_id': task['server_id'], 'expected_version': task['server_version']});
+      if (row['kind'] == 'edit') {
+        body['fields'] = jsonDecode(row['fields'] as String);
+      } else {
+        body['status'] = row['status'];
+      }
     }
     final encoded = jsonEncode(body);
     await tx.update('account_queue', {'body': encoded}, where: 'sequence=?', whereArgs: [row['sequence']]);
@@ -91,7 +151,7 @@ class AccountStore {
       await tx.delete('account_queue', where: 'operation_uuid=?', whereArgs: [op['operation_uuid']]);
       final more = await tx.query('account_queue', where: 'local_id=?', whereArgs: [op['local_id']], limit: 1);
       final values = <String, Object?>{'server_id': task['id'], 'server_version': task['version'], 'remote_json': jsonEncode(task)};
-      if (more.isEmpty) values.addAll({'title': task['title'], 'status': task['status'], 'active': task['active'] == true ? 1 : 0});
+      if (more.isEmpty) values.addAll({..._details(task), 'title': task['title'], 'status': task['status'], 'active': task['active'] == true ? 1 : 0});
       await tx.update('account_tasks', values, where: 'local_id=?', whereArgs: [op['local_id']]);
     });
   }
@@ -102,7 +162,13 @@ class AccountStore {
   });
 
   /// Commit the complete scan at once. Never overwrite pending local changes.
-  Future<void> merge(List<Map<String, dynamic>> snapshot) => db.transaction((tx) async {
+  Future<void> merge(List<Map<String, dynamic>> snapshot, {List<Map<String, dynamic>>? projects}) => db.transaction((tx) async {
+    if (projects != null) {
+      await tx.delete('account_projects');
+      for (final project in projects) {
+        await tx.insert('account_projects', {'id': project['id'], 'name': project['name']});
+      }
+    }
     final seen = <int>{};
     for (final task in snapshot) {
       final id = task['id'] as int;
@@ -110,13 +176,13 @@ class AccountStore {
       final existing = await tx.query('account_tasks', where: 'server_id=? OR local_id=?', whereArgs: [id, task['uuid']]);
       final values = <String, Object?>{'remote_json': jsonEncode(task)};
       if (existing.isEmpty) {
-        values.addAll({'local_id': task['uuid'], 'server_id': id, 'server_version': task['version'],
+        values.addAll({..._details(task), 'local_id': task['uuid'], 'server_id': id, 'server_version': task['version'],
           'title': task['title'], 'status': task['status'], 'active': task['active'] == true ? 1 : 0});
         await tx.insert('account_tasks', values);
       } else {
         final localId = existing.single['local_id'];
         final pending = await tx.query('account_queue', where: 'local_id=?', whereArgs: [localId], limit: 1);
-        if (pending.isEmpty) values.addAll({'server_version': task['version'], 'title': task['title'],
+        if (pending.isEmpty) values.addAll({..._details(task), 'server_version': task['version'], 'title': task['title'],
           'status': task['status'], 'active': task['active'] == true ? 1 : 0});
         await tx.update('account_tasks', values, where: 'local_id=?', whereArgs: [localId]);
       }
@@ -139,7 +205,7 @@ class AccountStore {
     final row = (await tx.query('account_tasks', where: 'local_id=?', whereArgs: [localId])).single;
     if (row['server_id'] != task['id']) throw StateError('Другая задача');
     await tx.delete('account_queue', where: 'local_id=?', whereArgs: [localId]);
-    await tx.update('account_tasks', {'server_version': task['version'], 'title': task['title'],
+    await tx.update('account_tasks', {..._details(task), 'server_version': task['version'], 'title': task['title'],
       'status': task['status'], 'active': task['active'] == true ? 1 : 0, 'remote_json': jsonEncode(task)},
       where: 'local_id=?', whereArgs: [localId]);
   });

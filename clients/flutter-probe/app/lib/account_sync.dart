@@ -21,7 +21,15 @@ class AccountSync {
       if (next <= after) throw StateError('Сервер повторяет страницу');
       after = next;
     }
-    await store.merge(tasks);
+    final projects = <Map<String, dynamic>>[];
+    var page = 1;
+    while (true) {
+      final result = await api.page(token, 'projects', page);
+      projects.addAll((result['data'] as List).map((p) => Map<String, dynamic>.from(p as Map)));
+      if (page >= (result['meta'] as Map)['last_page']) break;
+      page++;
+    }
+    await store.merge(tasks, projects: projects);
   }
 
   Future<int> synchronize(String token, {required bool write}) async {
@@ -40,7 +48,7 @@ class AccountSync {
           if ([404, 409, 422].contains(error.status)) {
             await store.block(op, error.status == 409
                 ? 'Задача изменилась на сайте. Нужно выбрать версию.'
-                : 'Задача недоступна или находится в архиве. Проверь её на сайте.');
+                : 'Правка недоступна: проверь задачу, проект и данные на сайте.');
             continue;
           }
           rethrow; // Offline/401/403/429/5xx preserve the exact operation for retry.

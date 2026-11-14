@@ -34,12 +34,19 @@ class SyncController
     {
         $d = $r->validate([
             'operation_uuid' => 'required|uuid',
-            'kind' => ['required', Rule::in(['create', 'status'])],
+            'kind' => ['required', Rule::in(['create', 'status', 'edit'])],
             'title' => 'required_if:kind,create|prohibited_unless:kind,create|string|max:240',
-            'task_id' => 'required_if:kind,status|prohibited_unless:kind,status|integer|min:1',
-            'expected_version' => 'required_if:kind,status|prohibited_unless:kind,status|integer|min:1',
+            'task_id' => 'required_if:kind,status,edit|prohibited_if:kind,create|integer|min:1',
+            'expected_version' => 'required_if:kind,status,edit|prohibited_if:kind,create|integer|min:1',
             'status' => ['required_if:kind,status', 'prohibited_unless:kind,status', Rule::in(['todo', 'doing', 'done'])],
+            'fields' => 'required_if:kind,edit|prohibited_unless:kind,edit|array:title,description,due_date,priority,project_id|min:1',
+            'fields.title' => 'sometimes|required|string|max:240',
+            'fields.description' => 'sometimes|nullable|string|max:20000',
+            'fields.due_date' => 'sometimes|nullable|date_format:Y-m-d',
+            'fields.priority' => ['sometimes', Rule::in(['normal', 'high'])],
+            'fields.project_id' => 'sometimes|nullable|integer|min:1',
         ]);
+        if (isset($d['fields'])) ksort($d['fields']);
         ksort($d);
         $hash = hash('sha256', 'sync-operation-v1:'.json_encode($d, JSON_THROW_ON_ERROR));
         return app(RecurringTasks::class)->locked($r->user()->id, function () use ($r, $d, $hash) {
@@ -58,7 +65,7 @@ class SyncController
                 $task = Task::where('user_id', $uid)->findOrFail($d['task_id']);
                 abort_unless((int) $task->version === (int) $d['expected_version'], 409, 'Задача изменилась на другом устройстве.');
                 abort_unless(Task::whereKey($task->id)->activeBoard()->exists(), 422, 'Сначала восстановите задачу или проект на сайте.');
-                $task = app(TaskOrder::class)->update($uid, $task->id, ['status' => $d['status']]);
+                $task = app(TaskOrder::class)->update($uid, $task->id, $d['kind'] === 'edit' ? $d['fields'] : ['status' => $d['status']]);
             }
             $result = ['operation_uuid' => $d['operation_uuid'], 'task' => $this->data($task->fresh())];
             $status = $d['kind'] === 'create' ? 201 : 200;

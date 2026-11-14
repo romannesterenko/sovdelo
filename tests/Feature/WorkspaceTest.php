@@ -675,4 +675,31 @@ class WorkspaceTest extends TestCase {
   $this->apiCall('GET','/api/v1/me',$token)->assertOk()->assertJsonPath('data.access','write');
   $this->apiCall('GET','/api/v1/me',$this->deviceToken($u,false))->assertOk()->assertJsonPath('data.access','read');
  }
+ public function test_sync_edit_fields_and_replay_after_project_archive():void {
+  $u=$this->account();$token=$this->deviceToken($u);$p=Project::create(['user_id'=>$u->id,'name'=>'Мой проект']);$t=Task::create(['user_id'=>$u->id,'title'=>'До правки']);
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'edit','task_id'=>$t->id,'expected_version'=>$t->version,
+   'fields'=>['title'=>'После правки','description'=>'Текст описания','priority'=>'high','project_id'=>$p->id,'due_date'=>'2026-12-25']];
+  $result=$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertOk()->assertJsonPath('data.task.title','После правки')->assertJsonPath('data.task.description','Текст описания')->assertJsonPath('data.task.priority','high')->assertJsonPath('data.task.project_id',$p->id)->json('data');
+  $p->archived_at=now();$p->save();
+  $body['fields']=array_reverse($body['fields'],true);
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertOk()->assertExactJson(['data'=>$result,'meta'=>['api_version'=>'1']]);
+  $this->assertDatabaseCount('api_requests',1);
+ }
+ public function test_sync_edit_rejects_foreign_project_and_unallowed_fields():void {
+  $a=$this->account();$b=$this->account('edit-foreign@example.com');$token=$this->deviceToken($a);$p=Project::create(['user_id'=>$b->id,'name'=>'Чужой']);$t=Task::create(['user_id'=>$a->id,'title'=>'Не менять']);
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'edit','task_id'=>$t->id,'expected_version'=>$t->version,'fields'=>['title'=>'Нельзя','project_id'=>$p->id]];
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertUnprocessable();
+  $body['fields']=['user_id'=>$b->id];$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertUnprocessable();
+  $body['fields']=[];$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertUnprocessable();
+  $body['fields']=['due_date'=>'not-a-date'];$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertUnprocessable();
+  $this->assertSame('Не менять',$t->fresh()->title);$this->assertDatabaseCount('api_requests',0);
+ }
+ public function test_sync_edit_clears_optional_fields_and_detects_stale_version():void {
+  $u=$this->account();$token=$this->deviceToken($u);$p=Project::create(['user_id'=>$u->id,'name'=>'Проект']);$t=Task::create(['user_id'=>$u->id,'title'=>'Задача','description'=>'Текст','due_date'=>'2026-12-25','project_id'=>$p->id]);
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'edit','task_id'=>$t->id,'expected_version'=>$t->version,'fields'=>['description'=>null,'due_date'=>null,'project_id'=>null]];
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertOk()->assertJsonPath('data.task.description',null)->assertJsonPath('data.task.due_date',null)->assertJsonPath('data.task.project_id',null);
+  $body['operation_uuid']=(string)\Illuminate\Support\Str::uuid();$body['fields']=['title'=>'Устарело'];
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertConflict();
+  $this->assertSame('Задача',$t->fresh()->title);
+ }
 }
