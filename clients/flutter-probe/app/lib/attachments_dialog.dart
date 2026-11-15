@@ -9,10 +9,10 @@ import 'workspace_api.dart';
 
 class AttachmentsDialog extends StatefulWidget {
   final AccountStore store;final WorkspaceApi api;
-  final String token,localId,taskTitle;final bool canWrite;
+  final String token,localId,taskTitle;final bool canWrite;final bool fullScreen;
   final Future<void> Function() synchronize;
   const AttachmentsDialog({super.key,required this.store,required this.api,required this.token,
-    required this.localId,required this.taskTitle,required this.canWrite,required this.synchronize});
+    required this.localId,required this.taskTitle,required this.canWrite,required this.synchronize,this.fullScreen=false});
   @override
   State<AttachmentsDialog> createState()=>_AttachmentsDialogState();
 }
@@ -60,7 +60,8 @@ class _AttachmentsDialogState extends State<AttachmentsDialog> {
     await AttachmentFiles(widget.store).remove(file['local_path'] as String?);
   });
   @override
-  Widget build(BuildContext context)=>PopScope(canPop:!busy,child:AlertDialog(
+  Widget build(BuildContext context){
+    final dialog=AlertDialog(
     title:Text('Файлы · ${widget.taskTitle}'),
     content:SizedBox(width:680,child:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.stretch,children:[
       if(busy)const LinearProgressIndicator(),Text(message),
@@ -83,5 +84,10 @@ class _AttachmentsDialogState extends State<AttachmentsDialog> {
       const Text('До 10 МБ на файл. Без сети выбранный файл копируется в приложение и ждёт отправки. Удаление вложений с сайта пока выполняется через сайт.'),
     ]))),
     actions:[TextButton(onPressed:busy?null:()=>Navigator.pop(context),child:const Text('Закрыть'))],
-  ));
+  );
+    return PopScope(canPop:!busy,child:widget.fullScreen?Scaffold(
+      appBar:AppBar(title:const Text('Файлы'),leading:IconButton(onPressed:busy?null:()=>Navigator.pop(context),icon:const Icon(Icons.arrow_back))),
+      body:Padding(padding:const EdgeInsets.all(16),child:dialog.content!),persistentFooterButtons:dialog.actions,
+    ):dialog);
+  }
 }

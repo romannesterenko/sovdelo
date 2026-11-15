@@ -16,6 +16,10 @@ import 'labels_dialog.dart';
 import 'task_labels.dart';
 import 'attachments_dialog.dart';
 import 'attachment_files.dart';
+import 'diagnostics_page.dart';
+import 'task_tile.dart';
+import 'task_presentation.dart';
+import 'task_detail_view.dart';
 
 class SecureTokenVault implements TokenVault {
   final storage = const FlutterSecureStorage();
@@ -60,6 +64,11 @@ class _ServerPageState extends State<ServerPage> {
   bool busy = true;
   int pending = 0;
   List<Map<String, Object?>> labelCatalog = [];
+  int navigation=0, projectFilter=-1;
+  String searchQuery='', statusFilter='', labelFilter='';
+  bool queuedOnly=false;
+  List<Map<String,Object?>> projectCatalog=[];
+  final search=TextEditingController();
   bool get canWrite => profile?['access'] == 'write';
 
   @override
@@ -82,6 +91,7 @@ class _ServerPageState extends State<ServerPage> {
     items = await store!.tasks();
     pending = await store!.pendingCount();
     labelCatalog = await store!.labels();
+    projectCatalog = await store!.projects();
   }
 
   Future<void> restore() async {
@@ -89,7 +99,7 @@ class _ServerPageState extends State<ServerPage> {
       token = await vault.read();
       if (token == null) { message = 'Войди в аккаунт сайта совдело.рф.'; return; }
       profile = await vault.profile(token!);
-      if (profile != null) await openStore();
+      if (profile != null) {await openStore();if(mounted)setState((){});}
       await synchronize();
     } catch (e) { await handleError(e); }
     finally {
@@ -101,7 +111,7 @@ class _ServerPageState extends State<ServerPage> {
   Future<void> handleError(Object error) async {
     if (error is ApiFailure && error.status == 401) {
       await store?.db.close(); store = null;
-      token = null; profile = null; items = []; pending = 0; labelCatalog = [];
+      token = null; profile = null; items = []; pending = 0; labelCatalog = []; projectCatalog=[]; navigation=0; projectFilter=-1; statusFilter=labelFilter=searchQuery=''; queuedOnly=false;search.clear();
       try { await vault.delete(); } catch (_) { /* Revoked token cannot authorize requests. */ }
     }
     message = error is ApiFailure ? error.message
@@ -126,10 +136,10 @@ class _ServerPageState extends State<ServerPage> {
     profile = me;
     await vault.remember(token!, me);
     await openStore();
-    final count = await AccountSync(api, store!).synchronize(token!, write: canWrite);
+    await AccountSync(api, store!).synchronize(token!, write: canWrite);
     await reload();
-    message = pending == 0 ? 'Синхронизировано. Отправлено операций: $count.'
-        : 'Осталось операций: $pending. Проверь карточки с конфликтами.';
+    message = pending == 0 ? 'Всё сохранено и синхронизировано.'
+        : 'Есть изменения, ожидающие отправки. Проверь очередь и конфликты.';
   }
 
   Future<void> signIn() async {
@@ -146,7 +156,7 @@ class _ServerPageState extends State<ServerPage> {
   Future<void> signOut() => perform(() async {
     final revoked = await session.logout(token!);
     await store?.db.close(); store = null;
-    token = null; profile = null; items = []; pending = 0; labelCatalog = [];
+    token = null; profile = null; items = []; pending = 0; labelCatalog = []; projectCatalog=[]; navigation=0; projectFilter=-1; statusFilter=labelFilter=searchQuery=''; queuedOnly=false;search.clear();
     message = revoked ? 'Выход выполнен. Очередь сохранена для этого аккаунта.'
         : 'Выход выполнен локально. Отзови устройство в профиле сайта. Очередь сохранена.';
   });
@@ -155,6 +165,7 @@ class _ServerPageState extends State<ServerPage> {
     await store!.setStatus(task['local_id'] as String, status);
     await reload();
     message = 'Статус сохранён на устройстве.';
+    if(mounted)setState((){});
     await synchronize();
   });
 
@@ -205,57 +216,23 @@ class _ServerPageState extends State<ServerPage> {
       await reload(); message = 'Принята версия сайта.';
     }
   });
-  Future<void> showProjects() => perform(() async {
-    final rows = await store?.projects() ?? <Map<String, Object?>>[];
-    if (!mounted) return;
-    await showDialog<void>(context: context, builder: (context) => AlertDialog(
-      title: const Text('Проекты · локальная копия'),
-      content: SizedBox(width: 560, child: SingleChildScrollView(child: Column(
-        mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: rows.isEmpty ? [const Text('Проектов нет. При наличии сети нажми «Синхронизировать».')]
-            : [for (final row in rows) ListTile(title: Text(row['name'] as String))],
-      ))),
-      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Закрыть'))],
-    ));
-  });
 
   Future<void> editTask(Map<String, Object?> task) => perform(() async {
     final projects = await store!.projects();
     final labels = await store!.labels();
     if (!mounted) return;
-    final fields = await showDialog<Map<String, Object?>>(context: context,
-      builder: (_) => TaskEditor(task: task, projects: projects, labels: labels));
+    final mobile=MediaQuery.sizeOf(context).width<720;
+    final fields = mobile
+      ? await Navigator.of(context).push<Map<String,Object?>>(MaterialPageRoute<Map<String,Object?>>(builder:(_)=>TaskEditor(task:task,projects:projects,labels:labels,fullScreen:true)))
+      : await showDialog<Map<String,Object?>>(context:context,builder:(_)=>TaskEditor(task:task,projects:projects,labels:labels));
     if (fields == null) return;
     await store!.edit(task['local_id'] as String, fields);
     await reload();
     message = 'Правки сохранены на устройстве.';
+    if(mounted)setState((){});
     await synchronize();
   });
 
-  void showDetails(Map<String, dynamic> task) {
-    final status = {'todo': 'К выполнению', 'doing': 'В работе', 'done': 'Готово'}[task['status']] ?? task['status'];
-    showDialog<void>(context: context, builder: (context) => AlertDialog(
-      title: Text(task['title'] as String),
-      content: SizedBox(width: 560, child: SingleChildScrollView(child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text('Статус: $status · версия ${task['version']}'),
-          if (task['due_date'] != null) Text('Срок: ${task['due_date']}'),
-          const SizedBox(height: 16),
-          SelectableText((task['description'] as String?)?.isNotEmpty == true
-              ? task['description'] as String : 'Без описания'),
-          const SizedBox(height: 16),
-          for (final row in (task['checklist'] as List? ?? []))
-            Text('${row['done'] == true ? '✓' : '○'} ${row['text']}'),
-          const SizedBox(height: 16),
-          Text('Комментарии: ${task['comments_count']} · файлы: ${task['attachments_count']}'),
-          const Text('Это последняя серверная копия. Локальные правки доступны в редакторе.'),
-        ],
-      ))),
-      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Закрыть'))],
-    ));
-  }
 
   Future<void> openLabels() => perform(() async {
     await showDialog<void>(context: context, barrierDismissible: false, builder: (_) => LabelsDialog(
@@ -265,141 +242,190 @@ class _ServerPageState extends State<ServerPage> {
     await reload();
   });
 
-  Widget taskLabels(Map<String, Object?> task) {
-    final keys = TaskLabels.read(task['labels_json']);
-    return Wrap(spacing: 6, runSpacing: 4, children: [for (final key in keys) Builder(builder: (_) {
-      final matching = labelCatalog.where((label) => label['local_id'] == key);
-      final label = matching.isEmpty ? null : matching.first;
-      return Chip(label: Text(label?['name'] as String? ?? 'Недоступная метка'),
-        avatar: Icon(Icons.label, size: 16, color: Color(TaskLabels.colors[label?['color']] ?? 0xff929a9e)));
-    })]);
-  }
 
   Future<void> openAttachments(Map<String,Object?> task) => perform(() async {
-    await showDialog<void>(context:context,barrierDismissible:false,builder:(_)=>AttachmentsDialog(
-      store:store!,api:api,token:token!,localId:task['local_id'] as String,taskTitle:task['title'] as String,
-      canWrite:canWrite,synchronize:() async {await AccountSync(api,store!).synchronize(token!,write:canWrite);},
-    ));await reload();
-  });
-
-  int fileCount(Map<String,Object?> task) => task['remote_json']==null?0:
-      ((jsonDecode(task['remote_json'] as String) as Map)['attachments_count'] as int? ?? 0);
-
-  Future<void> openComments(Map<String, Object?> task) => perform(() async {
-    await showDialog<void>(context: context, barrierDismissible: false, builder: (_) => CommentsDialog(
-      store: store!, api: api, token: token!, localId: task['local_id'] as String,
-      taskTitle: task['title'] as String, author: (profile?['name'] ?? profile?['email'] ?? 'Я').toString(),
-      canWrite: canWrite,
-      synchronize: () async {
-        // Keep the dialog open on 401 so its local text remains visible; parent handles re-login afterwards.
-        await AccountSync(api, store!).synchronize(token!, write: canWrite);
-      },
-    ));
+    final mobile=MediaQuery.sizeOf(context).width<720;
+    Widget page()=>AttachmentsDialog(store:store!,api:api,token:token!,localId:task['local_id'] as String,
+      taskTitle:task['title'] as String,canWrite:canWrite,fullScreen:mobile,
+      synchronize:() async {await AccountSync(api,store!).synchronize(token!,write:canWrite);});
+    if(mobile) {await Navigator.of(context).push(MaterialPageRoute<void>(builder:(_)=>page()));}
+    else {await showDialog<void>(context:context,barrierDismissible:false,builder:(_)=>page());}
     await reload();
   });
 
-  int commentCount(Map<String, Object?> task) {
-    if (task['remote_json'] == null) return 0;
-    return (jsonDecode(task['remote_json'] as String) as Map)['comments_count'] as int? ?? 0;
-  }
+  Future<void> openComments(Map<String,Object?> task) => perform(() async {
+    final mobile=MediaQuery.sizeOf(context).width<720;
+    Widget page()=>CommentsDialog(store:store!,api:api,token:token!,localId:task['local_id'] as String,
+      taskTitle:task['title'] as String,author:(profile?['name']??profile?['email']??'Я').toString(),
+      canWrite:canWrite,fullScreen:mobile,
+      synchronize:() async {await AccountSync(api,store!).synchronize(token!,write:canWrite);});
+    if(mobile) {await Navigator.of(context).push(MaterialPageRoute<void>(builder:(_)=>page()));}
+    else {await showDialog<void>(context:context,barrierDismissible:false,builder:(_)=>page());}
+    await reload();
+  });
 
-  Widget checklistProgress(Map<String, Object?> task) {
-    final rows = Checklists.read(task['checklist_json']);
-    if (rows.isEmpty) return const SizedBox.shrink();
-    final done = rows.where((item) => item['done'] == true).length;
-    return Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Text('Чек-лист: $done/${rows.length}'),
-        const SizedBox(height: 4),
-        LinearProgressIndicator(value: done / rows.length),
-      ],
-    ));
-  }
+  Future<void> openTask(Map<String,Object?> task) => perform(() async {
+    final mobile=MediaQuery.sizeOf(context).width<720;
+    Future<Map<String,Object?>?> action(String kind,Map<String,Object?> current,Object? value) async {
+      switch(kind) {
+        case 'edit': await editTask(current); break;
+        case 'status': await editStatus(current,value as String); break;
+        case 'comments': await openComments(current); break;
+        case 'files': await openAttachments(current); break;
+        case 'resolve': await resolve(current); break;
+        case 'checklist': await perform(() async {
+          await store!.edit(current['local_id'] as String,{'checklist':value});await reload();await synchronize();
+        }); break;
+      }
+      return store==null?null:await store!.task(current['local_id'] as String);
+    }
+    Widget page()=>TaskDetailView(initial:task,projects:projectCatalog,labels:labelCatalog,fullScreen:mobile,
+      canWrite:canWrite,action:action,message:()=>message,readProjects:()=>store!.projects(),readLabels:()=>store!.labels());
+    if(mobile) {await Navigator.of(context).push(MaterialPageRoute<void>(builder:(_)=>page()));}
+    else {await showDialog<void>(context:context,barrierDismissible:false,builder:(_)=>page());}
+    await reload();
+  });
+
+  Future<void> addTask() => perform(() async {
+    title.clear();
+    int? selectedProject=projectFilter>0&&projectCatalog.any((p)=>p['id']==projectFilter)?projectFilter:null;
+    final value=await showDialog<String>(context:context,builder:(dialogContext)=>StatefulBuilder(builder:(dialogContext,setDialog)=>AlertDialog(
+      title:const Text('Новая задача'),content:SizedBox(width:480,child:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,children:[
+        TextField(controller:title,autofocus:true,maxLength:240,textInputAction:TextInputAction.done,
+          decoration:const InputDecoration(hintText:'Что нужно сделать?'),
+          onSubmitted:(value){if(value.trim().isNotEmpty)Navigator.pop(dialogContext,value.trim());}),
+        DropdownButton<int>(value:selectedProject??0,isExpanded:true,items:[
+          const DropdownMenuItem(value:0,child:Text('Без проекта')),
+          for(final p in projectCatalog)DropdownMenuItem(value:p['id'] as int,child:Text(p['name'] as String,maxLines:1,overflow:TextOverflow.ellipsis)),
+        ],onChanged:(id)=>setDialog(()=>selectedProject=id==0?null:id)),
+      ]))),
+      actions:[TextButton(onPressed:()=>Navigator.pop(dialogContext),child:const Text('Отмена')),
+        FilledButton(onPressed:(){if(title.text.trim().isNotEmpty)Navigator.pop(dialogContext,title.text.trim());},child:const Text('Добавить'))],
+    )));
+    if(value==null)return;
+    await store!.add(value,projectId:selectedProject);
+    search.clear();searchQuery=statusFilter=labelFilter='';queuedOnly=false;projectFilter=selectedProject??0;
+    await reload();message='Задача сохранена на устройстве.';if(mounted)setState((){});await synchronize();
+  });
 
   @override
   void dispose() {
-    email.dispose(); password.dispose(); title.dispose();
+    email.dispose(); password.dispose(); title.dispose(); search.dispose();
     if (!busy) store?.db.close();
     super.dispose();
   }
 
+  Widget syncStatus()=>Padding(padding:const EdgeInsets.symmetric(horizontal:20,vertical:10),child:Row(children:[
+    if(busy)const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2))
+    else Icon(pending>0?Icons.cloud_upload_outlined:Icons.cloud_done_outlined,size:18),
+    const SizedBox(width:10),Expanded(child:Tooltip(message:message,child:Text(busy?'Обновляем данные…':message,maxLines:2,overflow:TextOverflow.ellipsis,style:Theme.of(context).textTheme.bodySmall))),
+    if(pending>0)Padding(padding:const EdgeInsets.only(left:8),child:Text('$pending в очереди',style:Theme.of(context).textTheme.labelSmall)),
+  ]));
+
+  Widget loginView()=>Center(child:SingleChildScrollView(padding:const EdgeInsets.all(24),child:ConstrainedBox(
+    constraints:const BoxConstraints(maxWidth:420),child:Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+      const Icon(Icons.check_circle_outline,size:64,color:Color(0xff56c89b)),const SizedBox(height:20),
+      Text('Дела вместе',textAlign:TextAlign.center,style:Theme.of(context).textTheme.headlineMedium),
+      const SizedBox(height:8),const Text('Войди в аккаунт СовДела',textAlign:TextAlign.center),const SizedBox(height:32),
+      TextField(controller:email,enabled:!busy,keyboardType:TextInputType.emailAddress,autocorrect:false,
+        textInputAction:TextInputAction.next,decoration:const InputDecoration(labelText:'Email')),
+      const SizedBox(height:16),TextField(controller:password,enabled:!busy,obscureText:true,autocorrect:false,enableSuggestions:false,
+        onSubmitted:busy?null:(_)=>signIn(),decoration:const InputDecoration(labelText:'Пароль')),
+      const SizedBox(height:20),FilledButton(onPressed:busy?null:signIn,child:const Padding(padding:EdgeInsets.all(12),child:Text('Войти'))),
+      const SizedBox(height:16),Text(message,textAlign:TextAlign.center),
+      TextButton(onPressed:busy?null:()=>Navigator.of(context).push(MaterialPageRoute<void>(builder:(_)=>const DiagnosticsPage())),child:const Text('Диагностика устройства')),
+    ]),
+  )));
+
+  Widget tasksView(){
+    final visible=items.where((task)=>TaskPresentation.matches(task,query:searchQuery,status:statusFilter,
+      project:projectFilter,label:labelFilter,queued:queuedOnly)).toList();
+    final filters=<DropdownMenuItem<int>>[
+      const DropdownMenuItem(value:-1,child:Text('Все проекты')),const DropdownMenuItem(value:0,child:Text('Без проекта')),
+      for(final project in projectCatalog)DropdownMenuItem(value:project['id'] as int,child:Text(project['name'] as String,maxLines:1,overflow:TextOverflow.ellipsis)),
+      if(projectFilter>0&&!projectCatalog.any((p)=>p['id']==projectFilter))DropdownMenuItem(value:projectFilter,child:const Text('Недоступный проект')),
+    ];
+    return CustomScrollView(slivers:[
+      SliverToBoxAdapter(child:Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+      Padding(padding:const EdgeInsets.fromLTRB(20,12,20,8),child:TextField(controller:search,
+        decoration:InputDecoration(hintText:'Найти задачу',prefixIcon:const Icon(Icons.search),
+          suffixIcon:searchQuery.isEmpty?null:IconButton(tooltip:'Очистить поиск',onPressed:(){search.clear();setState(()=>searchQuery='');},icon:const Icon(Icons.close))),
+        onChanged:(value)=>setState(()=>searchQuery=value))),
+      SingleChildScrollView(scrollDirection:Axis.horizontal,padding:const EdgeInsets.symmetric(horizontal:20),child:Row(children:[
+        ChoiceChip(label:const Text('Все'),selected:statusFilter.isEmpty,onSelected:(_)=>setState(()=>statusFilter='')),
+        for(final entry in TaskPresentation.statuses.entries)Padding(padding:const EdgeInsets.only(left:8),child:ChoiceChip(label:Text(entry.value),selected:statusFilter==entry.key,onSelected:(_)=>setState(()=>statusFilter=entry.key))),
+        const SizedBox(width:8),FilterChip(label:const Text('В очереди'),selected:queuedOnly,onSelected:(value)=>setState(()=>queuedOnly=value)),
+      ])),
+      Padding(padding:const EdgeInsets.symmetric(horizontal:20,vertical:8),child:Wrap(spacing:16,runSpacing:6,children:[
+        SizedBox(width:230,child:DropdownButton<int>(isExpanded:true,value:projectFilter,items:filters,onChanged:(value){if(value!=null)setState(()=>projectFilter=value);})),
+        SizedBox(width:230,child:DropdownButton<String>(isExpanded:true,value:labelFilter,
+          items:[const DropdownMenuItem(value:'',child:Text('Все метки')),
+            for(final label in labelCatalog)DropdownMenuItem(value:label['local_id'] as String,child:Text(label['name'] as String,maxLines:1,overflow:TextOverflow.ellipsis)),
+            if(labelFilter.isNotEmpty&&!labelCatalog.any((l)=>l['local_id']==labelFilter))DropdownMenuItem(value:labelFilter,child:const Text('Недоступная метка'))],
+          onChanged:(value){if(value!=null)setState(()=>labelFilter=value);})),
+      ])),
+      Padding(padding:const EdgeInsets.symmetric(horizontal:20,vertical:4),child:Text('Задач: ${visible.length}',style:Theme.of(context).textTheme.labelMedium)),
+      ])),
+      if(visible.isEmpty)SliverFillRemaining(hasScrollBody:false,child:Center(child:Padding(padding:const EdgeInsets.all(24),child:Column(mainAxisSize:MainAxisSize.min,children:[
+        const Icon(Icons.task_alt,size:48),const SizedBox(height:12),const Text('Здесь пока пусто'),
+        const SizedBox(height:8),const Text('Добавь задачу или измени фильтры',textAlign:TextAlign.center),
+        TextButton(onPressed:(){search.clear();setState((){searchQuery=statusFilter=labelFilter='';projectFilter=-1;queuedOnly=false;});},child:const Text('Сбросить фильтры')),
+      ]))))
+      else SliverPadding(padding:const EdgeInsets.fromLTRB(16,4,16,100),sliver:SliverList(delegate:SliverChildBuilderDelegate((context,index){
+        final task=visible[index];final project=projectCatalog.where((p)=>p['id']==task['project_id']);
+        return TaskTile(key:ValueKey(task['local_id']),task:task,labels:labelCatalog,projectName:project.isEmpty?null:project.first['name'] as String,
+          onOpen:busy?null:()=>openTask(task),onToggle:busy||!canWrite||task['blocked']==1?null:()=>editStatus(task,task['status']=='done'?'todo':'done'));
+      },childCount:visible.length))),
+    ]);
+  }
+
+  Widget projectsView()=>ListView(padding:const EdgeInsets.all(20),children:[
+    Text('Проекты',style:Theme.of(context).textTheme.headlineSmall),const SizedBox(height:16),
+    if(projectCatalog.isEmpty)const Text('Проектов пока нет в локальной копии.'),
+    for(final project in projectCatalog)Card(child:ListTile(leading:const Icon(Icons.folder_outlined),
+      title:Text(project['name'] as String),subtitle:Text('Задач: ${items.where((task)=>task['project_id']==project['id']).length}'),
+      trailing:const Icon(Icons.chevron_right),onTap:()=>setState((){navigation=0;projectFilter=project['id'] as int;statusFilter=labelFilter=searchQuery='';queuedOnly=false;search.clear();}))),
+  ]);
+
+  Widget settingsView()=>ListView(padding:const EdgeInsets.all(20),children:[
+    Text('Настройки',style:Theme.of(context).textTheme.headlineSmall),const SizedBox(height:20),
+    ListTile(leading:const Icon(Icons.account_circle_outlined),title:Text(profile?['name']?.toString()??'Аккаунт'),subtitle:Text(profile?['email']?.toString()??'')),
+    ListTile(leading:const Icon(Icons.cloud_outlined),title:Text('Ожидает отправки: $pending'),subtitle:Text(message)),
+    if(!canWrite)const Padding(padding:EdgeInsets.all(12),child:Text('Токен только на чтение. Для редактирования выйди и войди снова.')),
+    ListTile(leading:const Icon(Icons.label_outline),title:const Text('Метки'),trailing:const Icon(Icons.chevron_right),onTap:busy?null:openLabels),
+    ListTile(leading:const Icon(Icons.build_outlined),title:const Text('Диагностика и тестовые задачи'),subtitle:const Text('Проверка хранилища и уведомлений'),
+      onTap:busy?null:()=>Navigator.of(context).push(MaterialPageRoute<void>(builder:(_)=>const DiagnosticsPage()))),
+    ListTile(leading:const Icon(Icons.logout),title:const Text('Выйти из аккаунта'),subtitle:const Text('Локальная очередь останется сохранённой'),onTap:busy?null:signOut),
+  ]);
+
   @override
-  Widget build(BuildContext context) => PopScope(
-    canPop: !busy,
-    child: Scaffold(
-    appBar: AppBar(title: const Text('Мои задачи · аккаунт')),
-    body: SingleChildScrollView(padding: const EdgeInsets.all(24), child: Center(
-      child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 900), child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          if (busy) const LinearProgressIndicator(),
-          Card(child: Padding(padding: const EdgeInsets.all(16), child: Text(message))),
-          if (token == null) ...[
-            TextField(controller: email, enabled: !busy, keyboardType: TextInputType.emailAddress,
-              autocorrect: false, decoration: const InputDecoration(labelText: 'Email')),
-            TextField(controller: password, enabled: !busy, obscureText: true, autocorrect: false,
-              enableSuggestions: false, decoration: const InputDecoration(labelText: 'Пароль')),
-            FilledButton(onPressed: busy ? null : signIn, child: const Text('Войти')),
-          ] else ...[
-            if (profile != null) Text('${profile!['name']} · ${profile!['email']}'),
-            Text('Ожидает отправки: $pending'),
-            Wrap(spacing: 12, children: [
-              OutlinedButton(onPressed: busy ? null : () => perform(synchronize), child: const Text('Синхронизировать')),
-              TextButton(onPressed: busy ? null : showProjects, child: const Text('Проекты')) ,
-              TextButton(onPressed: busy || store == null ? null : openLabels, child: const Text('Метки')),
-              TextButton(onPressed: busy ? null : signOut, child: const Text('Выйти')),
-            ]),
-            if (profile != null && !canWrite)
-              const Text('Текущий токен только на чтение. Выйди и войди снова, чтобы включить изменения.'),
-            if (store != null && canWrite) ...[
-              const SizedBox(height: 16),
-              TextField(controller: title, enabled: !busy, maxLength: 240,
-                decoration: const InputDecoration(labelText: 'Новая задача в аккаунте')),
-              FilledButton.icon(onPressed: busy ? null : () => perform(() async {
-                await store!.add(title.text); title.clear(); await reload();
-                message = 'Задача сохранена на устройстве.';
-                await synchronize();
-              }), icon: const Icon(Icons.add), label: const Text('Добавить')),
-            ],
-            const SizedBox(height: 16),
-            if (items.isEmpty && !busy) const Text('Нет активных задач в локальной копии аккаунта.'),
-            for (final task in items) Card(child: Padding(padding: const EdgeInsets.all(12), child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                Text(task['title'] as String, style: Theme.of(context).textTheme.titleMedium),
-                if (task['due_date'] != null) Text('Срок: ${task['due_date']}'),
-                if (task['priority'] == 'high') const Text('Высокий приоритет'),
-                taskLabels(task),
-                checklistProgress(task),
-                Text(task['blocked'] == 1 ? 'Конфликт: ${task['error']}'
-                    : (task['pending'] as int) > 0 ? 'Сохранено на устройстве · ожидает отправки' : 'Сохранено на сайте'),
-                Wrap(spacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
-                  DropdownButton<String>(value: task['status'] as String,
-                    items: const [
-                      DropdownMenuItem(value: 'todo', child: Text('К выполнению')),
-                      DropdownMenuItem(value: 'doing', child: Text('В работе')),
-                      DropdownMenuItem(value: 'done', child: Text('Готово')),
-                    ], onChanged: busy || !canWrite || task['blocked'] == 1 ? null
-                        : (status) { if (status != null) editStatus(task, status); }),
-                  TextButton(onPressed: busy || !canWrite || task['blocked'] == 1 ? null : () => editTask(task),
-                    child: const Text('Редактировать')),
-                  TextButton(onPressed: busy ? null : () => openComments(task),
-                    child: Text('Комментарии (${commentCount(task)})')),
-                  if ((task['pending_comments'] as int) > 0) Text('Ожидает комментариев: ${task['pending_comments']}'),
-                  TextButton(onPressed:busy?null:()=>openAttachments(task),child:Text('Файлы (${fileCount(task)})')),
-                  if((task['pending_attachments'] as int)>0)Text('Ожидает файлов: ${task['pending_attachments']}'),
-                  if (task['remote_json'] != null) TextButton(
-                    onPressed: () => showDetails(Map<String, dynamic>.from(jsonDecode(task['remote_json'] as String) as Map)),
-                    child: const Text('Детали с сайта')),
-                  if (task['blocked'] == 1) TextButton(onPressed: busy ? null : () => resolve(task),
-                    child: const Text('Разобрать конфликт')),
-                ]),
-              ],
-            ))),
-          ],
-          const SizedBox(height: 24),
-          const Text('Тестовые задачи на предыдущем экране остаются отдельно. Проект можно выбрать в редакторе задачи. '
-              'Отправка выполняется при изменении и по кнопке, пока экран открыт; фоновой синхронизации пока нет.'),
+  Widget build(BuildContext context)=>PopScope(canPop:!busy,child:LayoutBuilder(builder:(context,constraints){
+    final wide=constraints.maxWidth>=1000;
+    final authenticated=token!=null&&store!=null;
+    Widget content=authenticated?(navigation==0?tasksView():navigation==1?projectsView():settingsView()):token==null?loginView():Center(
+      child:Padding(padding:const EdgeInsets.all(24),child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:420),child:Column(
+        mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+          if(busy)const LinearProgressIndicator(),Text(message,textAlign:TextAlign.center),const SizedBox(height:16),
+          FilledButton(onPressed:busy?null:()=>perform(synchronize),child:const Text('Повторить подключение')),
+          TextButton(onPressed:busy?null:signOut,child:const Text('Выйти из аккаунта')),
         ],
-      )),
-    )),
-  ));
+      ))),
+    );
+    if(authenticated)content=Column(children:[syncStatus(),Expanded(child:content)]);
+    return Scaffold(
+      appBar:AppBar(title:const Text('СовДело'),actions:[
+        if(token!=null)IconButton(tooltip:'Синхронизировать',onPressed:busy?null:()=>perform(synchronize),icon:const Icon(Icons.sync)),
+      ]),
+      body:Row(children:[
+        if(authenticated&&wide)NavigationRail(extended:true,selectedIndex:navigation,onDestinationSelected:(value)=>setState(()=>navigation=value),
+          destinations:const [NavigationRailDestination(icon:Icon(Icons.task_alt),label:Text('Задачи')),
+            NavigationRailDestination(icon:Icon(Icons.folder_outlined),label:Text('Проекты')),
+            NavigationRailDestination(icon:Icon(Icons.settings_outlined),label:Text('Настройки'))]),
+        Expanded(child:content),
+      ]),
+      bottomNavigationBar:authenticated&&!wide?NavigationBar(selectedIndex:navigation,onDestinationSelected:(value)=>setState(()=>navigation=value),
+        destinations:const [NavigationDestination(icon:Icon(Icons.task_alt),label:'Задачи'),NavigationDestination(icon:Icon(Icons.folder_outlined),label:'Проекты'),NavigationDestination(icon:Icon(Icons.settings_outlined),label:'Настройки')]):null,
+      floatingActionButton:authenticated&&navigation==0&&canWrite?FloatingActionButton(tooltip:'Новая задача',onPressed:busy?null:addTask,child:const Icon(Icons.add)):null,
+    );
+  }));
 }

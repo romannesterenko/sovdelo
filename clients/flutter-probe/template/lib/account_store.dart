@@ -371,13 +371,16 @@ class AccountStore {
   ''');
   Future<int> pendingCount() async => (await db.rawQuery("SELECT (SELECT COUNT(*) FROM account_queue) + (SELECT COUNT(*) FROM account_comments WHERE state!='sent') + (SELECT COUNT(*) FROM account_labels WHERE state!='sent') + (SELECT COUNT(*) FROM account_attachments WHERE state!='sent') AS n")).single['n'] as int;
 
-  Future<void> add(String title) async {
+  Future<String> add(String title, {int? projectId}) async {
     final text = title.trim();
     if (text.isEmpty || text.length > 240) throw ArgumentError('Название: от 1 до 240 символов');
-    await db.transaction((tx) async {
+    if(projectId!=null&&projectId<1)throw ArgumentError('Некорректный проект');
+    return db.transaction((tx) async {
       final id = operationUuid();
-      await tx.insert('account_tasks', {'local_id': id, 'title': text, 'status': 'todo'});
+      await tx.insert('account_tasks', {'local_id': id, 'title': text, 'status': 'todo', 'project_id': projectId});
       await tx.insert('account_queue', {'operation_uuid': id, 'local_id': id, 'kind': 'create', 'title': text});
+      if(projectId!=null)await tx.insert('account_queue', {'operation_uuid':operationUuid(),'local_id':id,'kind':'edit','fields':jsonEncode({'project_id':projectId})});
+      return id;
     });
   }
 

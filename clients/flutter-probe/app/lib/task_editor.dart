@@ -6,7 +6,8 @@ class TaskEditor extends StatefulWidget {
   final Map<String, Object?> task;
   final List<Map<String, Object?>> projects;
   final List<Map<String, Object?>> labels;
-  const TaskEditor({super.key, required this.task, required this.projects, this.labels = const []});
+  final bool fullScreen;
+  const TaskEditor({super.key, required this.task, required this.projects, this.labels = const [], this.fullScreen=false});
   @override
   State<TaskEditor> createState() => _TaskEditorState();
 }
@@ -60,7 +61,7 @@ class _TaskEditorState extends State<TaskEditor> {
   @override
   Widget build(BuildContext context) {
     final unavailable = project != null && !widget.projects.any((p) => p['id'] == project);
-    return AlertDialog(
+    final dialog = AlertDialog(
       title: const Text('Редактирование задачи'),
       content: SizedBox(width: 640, child: SingleChildScrollView(child: Form(key: form, child: Column(
         mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -125,6 +126,10 @@ class _TaskEditorState extends State<TaskEditor> {
       actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Отмена')),
         FilledButton(onPressed: save, child: const Text('Сохранить'))],
     );
+    if(!widget.fullScreen)return dialog;
+    return Scaffold(appBar:AppBar(title:const Text('Редактирование'),actions:[
+      TextButton(onPressed:save,child:const Text('Сохранить')),
+    ]),body:Padding(padding:const EdgeInsets.all(16),child:dialog.content!));
   }
 }
 

@@ -1,0 +1,9 @@
+{
+  "lib/main.dart": "05034d67d642d1dd899db3be0f6f21a9d15b4d5b40591fbf969e8cb3242cdd80",
+  "lib/server_page.dart": "726a6c36c26950fe04904960bef4b26271326801f770c0be3cb0b5c2c60a4841",
+  "lib/task_editor.dart": "4f9b15829959d78edd2c920e9d38a6728f9c94e3f26a78075984a78839eb4aba",
+  "lib/comments_dialog.dart": "cbcdd85a1ee5355f973ce72da22a99a8e9f3393b8c5b2d84010ad49829fac341",
+  "lib/attachments_dialog.dart": "29c297743a5e6c4dca654de0661a69e919d0e886564d4d3a3605f7b4d70ae199",
+  "lib/account_store.dart": "1f81eae430d93a4e384d2a7b8f423a71a10d49e4cf301fd17987185687b75eca",
+  "lib/workspace_api.dart": "8128c7ad287f2c380050837d67018fb397b0ae32a0236dd2646175ec0d0b8d39"
+}

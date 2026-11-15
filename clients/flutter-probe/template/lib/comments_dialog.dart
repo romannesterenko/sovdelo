@@ -8,10 +8,11 @@ class CommentsDialog extends StatefulWidget {
   final WorkspaceApi api;
   final String token, localId, taskTitle, author;
   final bool canWrite;
+  final bool fullScreen;
   final Future<void> Function() synchronize;
   const CommentsDialog({super.key, required this.store, required this.api,
     required this.token, required this.localId, required this.taskTitle, required this.author,
-    required this.canWrite, required this.synchronize});
+    required this.canWrite, required this.synchronize, this.fullScreen=false});
   @override
   State<CommentsDialog> createState() => _CommentsDialogState();
 }
@@ -82,7 +83,8 @@ class _CommentsDialogState extends State<CommentsDialog> {
   @override
   void dispose() { body.dispose(); super.dispose(); }
   @override
-  Widget build(BuildContext context) => PopScope(canPop: !busy, child: AlertDialog(
+  Widget build(BuildContext context) {
+    final dialog=AlertDialog(
     title: Text('Комментарии · ${widget.taskTitle}'),
     content: SizedBox(width: 680, child: SingleChildScrollView(child: Column(
       mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -117,5 +119,11 @@ class _CommentsDialogState extends State<CommentsDialog> {
       ],
     ))),
     actions: [TextButton(onPressed: busy ? null : () => Navigator.pop(context), child: const Text('Закрыть'))],
-  ));
+  );
+    return PopScope(canPop:!busy,child:widget.fullScreen?Scaffold(
+      appBar:AppBar(title:const Text('Комментарии'),leading:IconButton(onPressed:busy?null:()=>Navigator.pop(context),icon:const Icon(Icons.arrow_back))),
+      body:Padding(padding:const EdgeInsets.all(16),child:dialog.content!),
+      persistentFooterButtons:dialog.actions,
+    ):dialog);
+  }
 }

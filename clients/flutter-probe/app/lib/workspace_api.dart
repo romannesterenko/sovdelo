@@ -70,7 +70,7 @@ class WorkspaceApi {
     } on HandshakeException {
       throw const ApiFailure(0, 'Не удалось проверить HTTPS-соединение с сервером.');
     } on SocketException {
-      throw const ApiFailure(0, 'Нет соединения с сервером. Локальные задачи доступны отдельно.');
+      throw const ApiFailure(0, 'Нет соединения с сервером. Проверь сеть и повтори.');
     } on HttpException {
       throw const ApiFailure(0, 'Соединение прервалось. Повтори запрос.');
     } finally {
