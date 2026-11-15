@@ -43,6 +43,7 @@ void main() {
     Map<String, dynamic>? receipt;
     var creates = 0;
     final api = WorkspaceApi(transport: (method, path, token, body) async {
+      if (path.startsWith('labels?')) return {'data': [], 'meta': {'through_id': 0, 'after_id': 0, 'has_more': false}};
       if (path.startsWith('projects?')) return {'data': [], 'meta': {'last_page': 1}};
       if (path.startsWith('tasks/7/comments?')) return {'data': saved == null ? [] : [saved],
         'meta': {'through_id': 11, 'after_id': 11, 'has_more': false}};
@@ -100,6 +101,7 @@ void main() {
     await store.mergeComments(taskUuid, [comment(operationUuid())]);
     var calls = 0;
     final api = WorkspaceApi(transport: (method, path, token, body) async {
+      if (path.startsWith('labels?')) return {'data': [], 'meta': {'through_id': 0, 'after_id': 0, 'has_more': false}};
       calls++;
       if (calls == 2) throw const ApiFailure(0, 'Offline');
       return {'data': [comment(operationUuid(), body: 'Не применять')],

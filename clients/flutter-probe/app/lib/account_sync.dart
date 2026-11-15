@@ -30,7 +30,19 @@ class AccountSync {
       if (page >= (result['meta'] as Map)['last_page']) break;
       page++;
     }
-    await store.merge(tasks, projects: projects);
+    final labels = <Map<String, dynamic>>[];
+    after = 0; through = null;
+    while (true) {
+      final result = await api.labels(token, after, through);
+      final meta = result['meta'] as Map;
+      through ??= meta['through_id'] as int;
+      labels.addAll((result['data'] as List).map((l) => Map<String, dynamic>.from(l as Map)));
+      if (meta['has_more'] != true) break;
+      final next = meta['after_id'] as int;
+      if (next <= after) throw StateError('Сервер повторяет страницу меток');
+      after = next;
+    }
+    await store.merge(tasks, projects: projects, labels: labels);
   }
 
   Future<int> synchronize(String token, {required bool write}) async {
@@ -39,8 +51,24 @@ class AccountSync {
     var sent = 0;
     if (write) {
       while (true) {
+        final label = await store.prepareLabel();
+        if (label == null) break;
+        try {
+          final receipt = await api.operation(token, Map<String, dynamic>.from(jsonDecode(label['request_json'] as String) as Map));
+          await store.acknowledgeLabel(label, receipt);
+          sent++;
+        } on ApiFailure catch (error) {
+          if ([404, 409, 422].contains(error.status)) {
+            await store.blockLabel(label['local_id'] as String);
+            continue;
+          }
+          rethrow;
+        }
+      }
+      while (true) {
         final op = await store.prepare();
         if (op == null) break;
+        if (op['blocked'] == 1) continue;
         try {
           final receipt = await api.operation(token, Map<String, dynamic>.from(jsonDecode(op['body'] as String) as Map));
           await store.acknowledge(op, receipt);

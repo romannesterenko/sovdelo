@@ -19,7 +19,7 @@ class TaskDetailsController
  }
  public function setLabels(Request $r,int $task){
   $d=$r->validate(['ids'=>'present|array|max:20','ids.*'=>['required','integer','distinct',Rule::exists('labels','id')->where('user_id',$r->user()->id)]]);
-  return $this->locked($r,$task,function($t)use($d){$t->labels()->sync($d['ids']);return $t->fresh();});
+  return $this->locked($r,$task,function($t)use($d){$changes=$t->labels()->sync($d['ids']);if($changes['attached']||$changes['detached']||$changes['updated'])Task::whereKey($t->id)->increment('version');return $t->fresh();});
  }
  public function comment(Request $r,int $task){
   $d=$r->validate(['body'=>'required|string|max:10000']);

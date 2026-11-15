@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'checklists.dart';
+import 'task_labels.dart';
 
 class TaskEditor extends StatefulWidget {
   final Map<String, Object?> task;
   final List<Map<String, Object?>> projects;
-  const TaskEditor({super.key, required this.task, required this.projects});
+  final List<Map<String, Object?>> labels;
+  const TaskEditor({super.key, required this.task, required this.projects, this.labels = const []});
   @override
   State<TaskEditor> createState() => _TaskEditorState();
 }
@@ -17,6 +19,7 @@ class _TaskEditorState extends State<TaskEditor> {
   late String priority = widget.task['priority'] as String? ?? 'normal';
   late int? project = widget.task['project_id'] as int?;
   late final checklist = Checklists.read(widget.task['checklist_json']).map((item) => _ChecklistDraft(item['text'] as String, item['done'] as bool)).toList();
+  late final selectedLabels = TaskLabels.read(widget.task['labels_json']).toSet();
   final removedControllers = <TextEditingController>[];
 
   String? dateError(String? value) {
@@ -41,6 +44,7 @@ class _TaskEditorState extends State<TaskEditor> {
       'description': description.text.isEmpty ? null : description.text,
       'due_date': due.text.isEmpty ? null : due.text,
       'priority': priority, 'project_id': project,
+      'label_keys': TaskLabels.keys(selectedLabels.toList()),
       'checklist': Checklists.normalize([for (final item in checklist) {'text': item.text.text, 'done': item.done}]),
     });
   }
@@ -73,6 +77,20 @@ class _TaskEditorState extends State<TaskEditor> {
               for (final p in widget.projects) DropdownMenuItem<int?>(value: p['id'] as int, child: Text(p['name'] as String)),
               if (unavailable) DropdownMenuItem<int?>(value: project, enabled: false, child: Text('Проект #$project · недоступен')),
             ], onChanged: (value) => setState(() => project = value)),
+          const SizedBox(height: 12),
+          const Text('Метки'),
+          Wrap(spacing: 8, runSpacing: 4, children: [
+            for (final label in widget.labels) FilterChip(
+              label: Text(label['name'] as String),
+              avatar: Icon(Icons.label, size: 18, color: Color(TaskLabels.colors[label['color']] ?? 0xff929a9e)),
+              selected: selectedLabels.contains(label['local_id']),
+              onSelected: selectedLabels.length >= 20 && !selectedLabels.contains(label['local_id']) ? null : (value) => setState(() {
+                if (value) { selectedLabels.add(label['local_id'] as String); } else { selectedLabels.remove(label['local_id']); }
+              })),
+            for (final key in selectedLabels.where((key) => !widget.labels.any((label) => label['local_id'] == key)).toList())
+              InputChip(label: const Text('Недоступная метка'), onDeleted: () => setState(() => selectedLabels.remove(key))),
+          ]),
+          const Text('До 20 меток. Новую можно создать кнопкой «Метки» на экране аккаунта.'),
           const SizedBox(height: 12),
           const Text('Приоритет'),
           DropdownButton<String>(value: priority, isExpanded: true,

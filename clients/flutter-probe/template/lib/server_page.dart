@@ -12,6 +12,8 @@ import 'account_sync.dart';
 import 'task_editor.dart';
 import 'checklists.dart';
 import 'comments_dialog.dart';
+import 'labels_dialog.dart';
+import 'task_labels.dart';
 
 class SecureTokenVault implements TokenVault {
   final storage = const FlutterSecureStorage();
@@ -55,6 +57,7 @@ class _ServerPageState extends State<ServerPage> {
   String message = 'Открываем аккаунт…';
   bool busy = true;
   int pending = 0;
+  List<Map<String, Object?>> labelCatalog = [];
   bool get canWrite => profile?['access'] == 'write';
 
   @override
@@ -75,6 +78,7 @@ class _ServerPageState extends State<ServerPage> {
     if (store == null) return;
     items = await store!.tasks();
     pending = await store!.pendingCount();
+    labelCatalog = await store!.labels();
   }
 
   Future<void> restore() async {
@@ -94,7 +98,7 @@ class _ServerPageState extends State<ServerPage> {
   Future<void> handleError(Object error) async {
     if (error is ApiFailure && error.status == 401) {
       await store?.db.close(); store = null;
-      token = null; profile = null; items = []; pending = 0;
+      token = null; profile = null; items = []; pending = 0; labelCatalog = [];
       try { await vault.delete(); } catch (_) { /* Revoked token cannot authorize requests. */ }
     }
     message = error is ApiFailure ? error.message
@@ -139,7 +143,7 @@ class _ServerPageState extends State<ServerPage> {
   Future<void> signOut() => perform(() async {
     final revoked = await session.logout(token!);
     await store?.db.close(); store = null;
-    token = null; profile = null; items = []; pending = 0;
+    token = null; profile = null; items = []; pending = 0; labelCatalog = [];
     message = revoked ? 'Выход выполнен. Очередь сохранена для этого аккаунта.'
         : 'Выход выполнен локально. Отзови устройство в профиле сайта. Очередь сохранена.';
   });
@@ -179,10 +183,12 @@ class _ServerPageState extends State<ServerPage> {
       content: SizedBox(width: 640, child: SingleChildScrollView(child: Text(
           'НА УСТРОЙСТВЕ\n${local['title']} · ${local['status']}\n'
           'Проект: ${local['project_id'] ?? 'без проекта'} · срок: ${local['due_date'] ?? 'нет'}\n'
+          'Метки на устройстве: ${TaskLabels.read(local['labels_json']).join(', ')}\n'
           'Приоритет: ${local['priority']}\n${local['description'] ?? ''}\n'
           'Чек-лист:\n${Checklists.read(local['checklist_json']).map((i) => '${i['done'] == true ? '✓' : '○'} ${i['text']}').join('\n')}\n\n'
           'НА САЙТЕ\n${remote['title']} · ${remote['status']}\n'
           'Проект: ${remote['project_id'] ?? 'без проекта'} · срок: ${remote['due_date'] ?? 'нет'}\n'
+          'Метки на сайте: ${(remote['labels'] as List? ?? []).map((l) => l['name']).join(', ')}\n'
           'Приоритет: ${remote['priority']}\n${remote['description'] ?? ''}\n'
           'Чек-лист:\n${(remote['checklist'] as List? ?? []).map((i) => '${i['done'] == true ? '✓' : '○'} ${i['text']}').join('\n')}\n\n'
           'Принять все поля версии сайта и удалить ожидающие правки полей этой задачи? Комментарии сохранятся.'))),
@@ -212,9 +218,10 @@ class _ServerPageState extends State<ServerPage> {
 
   Future<void> editTask(Map<String, Object?> task) => perform(() async {
     final projects = await store!.projects();
+    final labels = await store!.labels();
     if (!mounted) return;
     final fields = await showDialog<Map<String, Object?>>(context: context,
-      builder: (_) => TaskEditor(task: task, projects: projects));
+      builder: (_) => TaskEditor(task: task, projects: projects, labels: labels));
     if (fields == null) return;
     await store!.edit(task['local_id'] as String, fields);
     await reload();
@@ -245,6 +252,24 @@ class _ServerPageState extends State<ServerPage> {
       ))),
       actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Закрыть'))],
     ));
+  }
+
+  Future<void> openLabels() => perform(() async {
+    await showDialog<void>(context: context, barrierDismissible: false, builder: (_) => LabelsDialog(
+      store: store!, canWrite: canWrite,
+      synchronize: () async { await AccountSync(api, store!).synchronize(token!, write: canWrite); },
+    ));
+    await reload();
+  });
+
+  Widget taskLabels(Map<String, Object?> task) {
+    final keys = TaskLabels.read(task['labels_json']);
+    return Wrap(spacing: 6, runSpacing: 4, children: [for (final key in keys) Builder(builder: (_) {
+      final matching = labelCatalog.where((label) => label['local_id'] == key);
+      final label = matching.isEmpty ? null : matching.first;
+      return Chip(label: Text(label?['name'] as String? ?? 'Недоступная метка'),
+        avatar: Icon(Icons.label, size: 16, color: Color(TaskLabels.colors[label?['color']] ?? 0xff929a9e)));
+    })]);
   }
 
   Future<void> openComments(Map<String, Object?> task) => perform(() async {
@@ -307,6 +332,7 @@ class _ServerPageState extends State<ServerPage> {
             Wrap(spacing: 12, children: [
               OutlinedButton(onPressed: busy ? null : () => perform(synchronize), child: const Text('Синхронизировать')),
               TextButton(onPressed: busy ? null : showProjects, child: const Text('Проекты')) ,
+              TextButton(onPressed: busy || store == null ? null : openLabels, child: const Text('Метки')),
               TextButton(onPressed: busy ? null : signOut, child: const Text('Выйти')),
             ]),
             if (profile != null && !canWrite)
@@ -328,6 +354,7 @@ class _ServerPageState extends State<ServerPage> {
                 Text(task['title'] as String, style: Theme.of(context).textTheme.titleMedium),
                 if (task['due_date'] != null) Text('Срок: ${task['due_date']}'),
                 if (task['priority'] == 'high') const Text('Высокий приоритет'),
+                taskLabels(task),
                 checklistProgress(task),
                 Text(task['blocked'] == 1 ? 'Конфликт: ${task['error']}'
                     : (task['pending'] as int) > 0 ? 'Сохранено на устройстве · ожидает отправки' : 'Сохранено на сайте'),

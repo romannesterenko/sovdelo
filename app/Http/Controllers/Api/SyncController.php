@@ -1,7 +1,7 @@
 <?php
 namespace App\Http\Controllers\Api;
 
-use App\Models\{Task,TaskComment};
+use App\Models\{Task,TaskComment,Label};
 use App\Services\{ApiData,RecurringTasks,TaskOrder};
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -52,22 +52,37 @@ class SyncController
             'meta'=>['api_version'=>'1','through_id'=>$through,'after_id'=>$rows->last()?->id??$after,'has_more'=>$more]]);
     }
 
+    public function labels(Request $r)
+    {
+        $d=$r->validate(['after_id'=>'sometimes|integer|min:0','through_id'=>'sometimes|integer|min:0']);
+        $uid=$r->user()->id;$after=(int)($d['after_id']??0);
+        $through=$d['through_id']??(int)Label::where('user_id',$uid)->max('id');
+        $rows=Label::where('user_id',$uid)->where('id','>',$after)->where('id','<=',$through)->orderBy('id')->limit(101)->get();
+        $more=$rows->count()>100;$rows=$rows->take(100);
+        return response()->json(['data'=>$rows->map(fn($l)=>['id'=>(int)$l->id,'name'=>$l->name,'color'=>$l->color])->values(),
+            'meta'=>['api_version'=>'1','through_id'=>$through,'after_id'=>$rows->last()?->id??$after,'has_more'=>$more]]);
+    }
+
     public function operation(Request $r)
     {
         $d = $r->validate([
             'operation_uuid' => 'required|uuid',
-            'kind' => ['required', Rule::in(['create', 'status', 'edit', 'comment'])],
+            'kind' => ['required', Rule::in(['create', 'status', 'edit', 'comment', 'label'])],
             'title' => 'required_if:kind,create|prohibited_unless:kind,create|string|max:240',
-            'task_id' => 'required_if:kind,status,edit,comment|prohibited_if:kind,create|integer|min:1',
+            'task_id' => 'required_if:kind,status,edit,comment|prohibited_unless:kind,status,edit,comment|integer|min:1',
             'expected_version' => 'required_if:kind,status,edit|prohibited_unless:kind,status,edit|integer|min:1',
+            'label_name' => 'required_if:kind,label|prohibited_unless:kind,label|string|max:40',
+            'label_color' => ['required_if:kind,label','prohibited_unless:kind,label',Rule::in(['green','blue','purple','orange','red','gray'])],
             'comment_body' => 'required_if:kind,comment|prohibited_unless:kind,comment|string|max:10000',
             'status' => ['required_if:kind,status', 'prohibited_unless:kind,status', Rule::in(['todo', 'doing', 'done'])],
-            'fields' => 'required_if:kind,edit|prohibited_unless:kind,edit|array:title,description,due_date,priority,project_id,checklist|min:1',
+            'fields' => 'required_if:kind,edit|prohibited_unless:kind,edit|array:title,description,due_date,priority,project_id,checklist,label_ids|min:1',
             'fields.title' => 'sometimes|required|string|max:240',
             'fields.description' => 'sometimes|nullable|string|max:20000',
             'fields.due_date' => 'sometimes|nullable|date_format:Y-m-d',
             'fields.priority' => ['sometimes', Rule::in(['normal', 'high'])],
             'fields.project_id' => 'sometimes|nullable|integer|min:1',
+            'fields.label_ids' => 'sometimes|array|list|max:20',
+            'fields.label_ids.*' => 'required|integer|min:1|distinct',
             'fields.checklist' => 'sometimes|array|list|max:100',
             'fields.checklist.*' => 'required|array:text,done',
             'fields.checklist.*.text' => 'required|string|max:500',
@@ -87,7 +102,10 @@ class SyncController
                 abort_unless(hash_equals($old->fingerprint, $hash), 409, 'UUID операции уже использован для другого содержимого.');
                 return ApiData::response(json_decode($old->result, true), $old->status);
             }
-            if ($d['kind'] === 'comment') {
+            if ($d['kind'] === 'label') {
+                $label=Label::where('user_id',$uid)->where('name',$d['label_name'])->first();
+                if (!$label) $label=Label::create(['user_id'=>$uid,'name'=>$d['label_name'],'color'=>$d['label_color']]);
+            } elseif ($d['kind'] === 'comment') {
                 $task=Task::where('user_id',$uid)->findOrFail($d['task_id']);
                 $comment=new TaskComment(['task_id'=>$task->id,'user_id'=>$uid,'body'=>$d['comment_body']]);
                 $comment->client_uuid=$d['operation_uuid'];$comment->save();
@@ -101,11 +119,23 @@ class SyncController
                 $task = Task::where('user_id', $uid)->findOrFail($d['task_id']);
                 abort_unless((int) $task->version === (int) $d['expected_version'], 409, 'Задача изменилась на другом устройстве.');
                 abort_unless(Task::whereKey($task->id)->activeBoard()->exists(), 422, 'Сначала восстановите задачу или проект на сайте.');
-                $task = app(TaskOrder::class)->update($uid, $task->id, $d['kind'] === 'edit' ? $d['fields'] : ['status' => $d['status']]);
+                $fields=$d['kind'] === 'edit' ? $d['fields'] : ['status'=>$d['status']];
+                $labelIds=$fields['label_ids']??null;unset($fields['label_ids']);
+                if ($labelIds !== null) {
+                    abort_unless(Label::where('user_id',$uid)->whereIn('id',$labelIds)->count()===count($labelIds),422,'Одна из меток недоступна.');
+                }
+                $before=(int)$task->version;
+                $task = app(TaskOrder::class)->update($uid, $task->id, $fields);
+                if ($labelIds !== null) {
+                    $changed=$task->labels()->sync($labelIds);
+                    if (($changed['attached']||$changed['detached']||$changed['updated']) && (int)$task->version===$before) Task::whereKey($task->id)->increment('version');
+                }
             }
-            $result = ['operation_uuid' => $d['operation_uuid'], 'task' => $this->data($task->fresh())];
+            $result = ['operation_uuid'=>$d['operation_uuid']];
+            if ($d['kind']==='label') $result['label']=['id'=>(int)$label->id,'name'=>$label->name,'color'=>$label->color];
+            else $result['task']=$this->data($task->fresh());
             if ($d['kind'] === 'comment') $result['comment']=$this->commentData($comment);
-            $status = in_array($d['kind'], ['create','comment'], true) ? 201 : 200;
+            $status = in_array($d['kind'], ['create','comment','label'], true) ? 201 : 200;
             DB::table('api_requests')->insert(['user_id' => $uid, 'request_key' => $d['operation_uuid'],
                 'fingerprint' => $hash, 'result' => json_encode($result, JSON_THROW_ON_ERROR),
                 'status' => $status, 'created_at' => now(), 'updated_at' => now()]);

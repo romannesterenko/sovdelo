@@ -137,6 +137,12 @@ class WorkspaceApi {
     return result;
   }
 
+  Future<Map<String, dynamic>> labels(String token, int after, int? through) async {
+    final result = await _transport('GET', 'labels?after_id=$after${through == null ? '' : '&through_id=$through'}', token, null);
+    if (result['data'] is! List || result['meta'] is! Map) throw const ApiFailure(0, 'Некорректный каталог меток.');
+    return result;
+  }
+
   Future<void> revoke(String token) async {
     await _transport('DELETE', 'auth/token', token, null);
   }

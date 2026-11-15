@@ -763,4 +763,39 @@ class WorkspaceTest extends TestCase {
   $body['operation_uuid']=(string)\Illuminate\Support\Str::uuid();$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertNotFound();
   $this->assertDatabaseCount('task_comments',1);
  }
+ public function test_sync_label_create_retry_and_same_name_reuses_existing_color():void {
+  $u=$this->account();$token=$this->deviceToken($u);$body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'label','label_name'=>'Работа','label_color'=>'red'];
+  $result=$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertCreated()->assertJsonPath('data.label.name','Работа')->json('data');
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertCreated()->assertExactJson(['data'=>$result,'meta'=>['api_version'=>'1']]);
+  $body['label_color']='blue';$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertConflict();
+  $body['operation_uuid']=(string)\Illuminate\Support\Str::uuid();
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertCreated()->assertJsonPath('data.label.id',$result['label']['id'])->assertJsonPath('data.label.color','red');
+  $this->assertDatabaseCount('labels',1);
+ }
+ public function test_sync_label_assignment_clear_and_web_change_increment_task_version():void {
+  $u=$this->account();$token=$this->deviceToken($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Метки']);$l=\App\Models\Label::create(['user_id'=>$u->id,'name'=>'Дом','color'=>'green']);$version=$t->version;
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'edit','task_id'=>$t->id,'expected_version'=>$version,'fields'=>['label_ids'=>[$l->id]]];
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertOk()->assertJsonPath('data.task.labels.0.id',$l->id);$this->assertGreaterThan($version,$t->fresh()->version);
+  $beforeWeb=$t->fresh()->version;
+  $this->actingAs($u,'web')->putJson('/tasks/'.$t->id.'/labels',['ids'=>[]])->assertOk();
+  $this->assertGreaterThan($beforeWeb,$t->fresh()->version);
+  $body['operation_uuid']=(string)\Illuminate\Support\Str::uuid();$body['expected_version']=$beforeWeb;
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertConflict();
+  $body['operation_uuid']=(string)\Illuminate\Support\Str::uuid();$body['expected_version']=$t->fresh()->version;$body['fields']=['label_ids'=>[]];
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertOk()->assertJsonPath('data.task.labels',[]);
+ }
+ public function test_api_label_catalog_scopes_owner_and_requires_write_to_create():void {
+  $a=$this->account();$b=$this->account('labels-other@example.com');\App\Models\Label::create(['user_id'=>$a->id,'name'=>'Личное','color'=>'blue']);
+  $read=$this->deviceToken($b,false);$this->apiCall('GET','/api/v1/labels',$read)->assertOk()->assertJsonCount(0,'data');
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'label','label_name'=>'Новая','label_color'=>'red'];
+  $this->apiCall('POST','/api/v1/sync/operations',$read,$body)->assertForbidden();
+  $body['label_color']='unknown';$this->apiCall('POST','/api/v1/sync/operations',$this->deviceToken($a),$body)->assertUnprocessable();
+ }
+ public function test_sync_foreign_or_duplicate_labels_cannot_partially_update_task():void {
+  $a=$this->account();$b=$this->account('foreign-labels@example.com');$token=$this->deviceToken($a);$t=Task::create(['user_id'=>$a->id,'title'=>'Не менять']);$foreign=\App\Models\Label::create(['user_id'=>$b->id,'name'=>'Чужая','color'=>'red']);
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'edit','task_id'=>$t->id,'expected_version'=>$t->version,'fields'=>['title'=>'Нельзя','label_ids'=>[$foreign->id]]];
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertUnprocessable();
+  $body['fields']['label_ids']=[$foreign->id,$foreign->id];$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertUnprocessable();
+  $this->assertSame('Не менять',$t->fresh()->title);$this->assertDatabaseCount('api_requests',0);
+ }
 }

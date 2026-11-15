@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 import 'checklists.dart';
+import 'task_labels.dart';
 import 'package:sqflite_common/sqlite_api.dart';
 
 String operationUuid() {
@@ -15,7 +16,7 @@ class AccountStore {
   final Database db;
   AccountStore(this.db);
   static Future<AccountStore> open(DatabaseFactory factory, String path) async {
-    final db = await factory.openDatabase(path, options: OpenDatabaseOptions(version: 4, onCreate: (db, version) async {
+    final db = await factory.openDatabase(path, options: OpenDatabaseOptions(version: 5, onCreate: (db, version) async {
       await db.execute('CREATE TABLE account_tasks ('
           'local_id TEXT PRIMARY KEY, server_id INTEGER UNIQUE, server_version INTEGER, '
           'title TEXT NOT NULL, status TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, remote_json TEXT)');
@@ -27,10 +28,12 @@ class AccountStore {
       await _addDetails(db);
       await _addChecklist(db);
       await _addComments(db);
+      await _addLabels(db);
     }, onUpgrade: (db, old, version) async {
       if (old < 2) await _addDetails(db);
       if (old < 3) await _addChecklist(db);
       if (old < 4) await _addComments(db);
+      if (old < 5) await _addLabels(db);
     }));
     return AccountStore(db);
   }
@@ -39,6 +42,7 @@ class AccountStore {
     'description': task['description'], 'due_date': task['due_date'],
     'priority': task['priority'] ?? 'normal', 'project_id': task['project_id'],
     'checklist_json': jsonEncode(Checklists.fromRemote(task['checklist'] ?? [])),
+    'labels_json': jsonEncode(TaskLabels.fromRemote(task['labels'] ?? [])),
   };
 
   static Future<void> _addDetails(DatabaseExecutor db) async {
@@ -50,7 +54,7 @@ class AccountStore {
     await db.execute('CREATE TABLE account_projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');
     for (final row in await db.query('account_tasks', where: 'remote_json IS NOT NULL')) {
       final remote = Map<String, dynamic>.from(jsonDecode(row['remote_json'] as String) as Map);
-      await db.update('account_tasks', _details(remote)..remove('checklist_json'), where: 'local_id=?', whereArgs: [row['local_id']]);
+      await db.update('account_tasks', _details(remote)..remove('checklist_json')..remove('labels_json'), where: 'local_id=?', whereArgs: [row['local_id']]);
     }
   }
 
@@ -69,6 +73,86 @@ class AccountStore {
         'body TEXT NOT NULL, author TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, '
         'state TEXT NOT NULL, request_json TEXT, error TEXT)');
     await db.execute('CREATE INDEX comments_task ON account_comments(task_local_id, state)');
+  }
+
+  static Future<void> _addLabels(DatabaseExecutor db) async {
+    await db.execute("ALTER TABLE account_tasks ADD COLUMN labels_json TEXT NOT NULL DEFAULT '[]'");
+    await db.execute('CREATE TABLE account_labels ('
+      'local_id TEXT PRIMARY KEY, server_id INTEGER UNIQUE, name TEXT UNIQUE NOT NULL, color TEXT NOT NULL, '
+      'state TEXT NOT NULL, request_json TEXT, error TEXT)');
+    for (final row in await db.query('account_tasks', where: 'remote_json IS NOT NULL')) {
+      final remote = Map<String, dynamic>.from(jsonDecode(row['remote_json'] as String) as Map);
+      final labels = remote['labels'] as List? ?? [];
+      await db.update('account_tasks', {'labels_json': jsonEncode(TaskLabels.fromRemote(labels))},
+        where: 'local_id=?', whereArgs: [row['local_id']]);
+      for (final label in labels) {
+        await db.insert('account_labels', {'local_id': 'server-label-${label['id']}', 'server_id': label['id'],
+          'name': label['name'], 'color': label['color'], 'state': 'sent'}, conflictAlgorithm: ConflictAlgorithm.ignore);
+      }
+    }
+  }
+
+  Future<List<Map<String, Object?>>> labels() => db.query('account_labels', orderBy: 'name, local_id');
+  Future<String> addLabel(String name, String color) async {
+    final text = name.trim();
+    if (text.isEmpty || text.length > 40 || !TaskLabels.colors.containsKey(color)) throw ArgumentError('Название метки: 1–40 символов, выбери цвет');
+    return db.transaction((tx) async {
+      final existing = await tx.query('account_labels', where: 'name=?', whereArgs: [text]);
+      if (existing.isNotEmpty) return existing.single['local_id'] as String;
+      final key = operationUuid();
+      await tx.insert('account_labels', {'local_id': key, 'name': text, 'color': color, 'state': 'pending'});
+      return key;
+    });
+  }
+
+  Future<Map<String, Object?>?> prepareLabel() => db.transaction((tx) async {
+    final rows = await tx.query('account_labels', where: "state='pending'", orderBy: 'local_id', limit: 1);
+    if (rows.isEmpty) return null;
+    final row = rows.single;
+    if (row['request_json'] != null) return row;
+    final body = jsonEncode({'operation_uuid': row['local_id'], 'kind': 'label', 'label_name': row['name'], 'label_color': row['color']});
+    await tx.update('account_labels', {'request_json': body}, where: 'local_id=?', whereArgs: [row['local_id']]);
+    return {...row, 'request_json': body};
+  });
+
+  static Future<void> _resolveLabel(DatabaseExecutor tx, String oldKey, Map<String, dynamic> label) async {
+    final key = 'server-label-${label['id']}';
+    if (oldKey != key) {
+    for (final row in await tx.query('account_tasks')) {
+      final selected = TaskLabels.read(row['labels_json']);
+      if (!selected.contains(oldKey)) continue;
+      final updated = selected.map((value) => value == oldKey ? key : value).toSet().toList()..sort();
+      await tx.update('account_tasks', {'labels_json': jsonEncode(updated)}, where: 'local_id=?', whereArgs: [row['local_id']]);
+    }
+    for (final op in await tx.query('account_queue', where: "kind='edit' AND fields IS NOT NULL")) {
+      final fields = Map<String, dynamic>.from(jsonDecode(op['fields'] as String) as Map);
+      if (fields['label_keys'] is! List || !(fields['label_keys'] as List).contains(oldKey)) continue;
+      fields['label_keys'] = (fields['label_keys'] as List).map((v) => v == oldKey ? key : v).toSet().toList()..sort();
+      // Only local references change. An already frozen HTTP body must never change.
+      final values = <String, Object?>{'fields': jsonEncode(fields)};
+      if (op['blocked'] == 1 && op['body'] == null && op['error'] == 'Метка ещё не отправлена. Проверь каталог меток.' &&
+          (fields['label_keys'] as List).every((key) => RegExp(r'^server-label-[1-9][0-9]*$').hasMatch(key as String))) {
+        values.addAll({'blocked': 0, 'error': null});
+      }
+      await tx.update('account_queue', values, where: 'sequence=?', whereArgs: [op['sequence']]);
+    }
+    }
+    await tx.delete('account_labels', where: 'local_id=?', whereArgs: [oldKey]);
+    await tx.insert('account_labels', {'local_id': key, 'server_id': label['id'], 'name': label['name'],
+      'color': label['color'], 'state': 'sent'}, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> acknowledgeLabel(Map<String, Object?> op, Map<String, dynamic> receipt) async {
+    if (receipt['operation_uuid'] != op['local_id'] || receipt['label'] is! Map) throw StateError('Некорректное подтверждение метки');
+    final label = Map<String, dynamic>.from(receipt['label'] as Map);
+    if (label['id'] is! int || label['name'] != op['name']) throw StateError('Подтверждена другая метка');
+    await db.transaction((tx) async { await _resolveLabel(tx, op['local_id'] as String, label); });
+  }
+  Future<void> blockLabel(String key) async {
+    await db.update('account_labels', {'state': 'blocked', 'error': 'Метка не принята сервером. Повтори после проверки аккаунта.'}, where: 'local_id=?', whereArgs: [key]);
+  }
+  Future<void> retryLabel(String key) async {
+    await db.update('account_labels', {'state': 'pending', 'error': null}, where: "local_id=? AND state='blocked'", whereArgs: [key]);
   }
 
   Future<Map<String, Object?>> task(String localId) async =>
@@ -150,7 +234,7 @@ class AccountStore {
   Future<List<Map<String, Object?>>> projects() => db.query('account_projects', orderBy: 'name, id');
 
   Future<void> edit(String id, Map<String, Object?> fields) async {
-    const allowed = {'title', 'description', 'due_date', 'priority', 'project_id', 'checklist'};
+    const allowed = {'title', 'description', 'due_date', 'priority', 'project_id', 'checklist', 'label_keys'};
     if (fields.keys.any((key) => !allowed.contains(key))) throw ArgumentError('Неизвестное поле');
     if (fields.containsKey('title') &&
         (fields['title'] is! String || (fields['title'] as String).trim().isEmpty || (fields['title'] as String).length > 240)) {
@@ -167,11 +251,16 @@ class AccountStore {
       final date = value is String ? DateTime.tryParse(value) : null;
       if (date == null || date.year < 1 || date.year > 9999 || date.toIso8601String().substring(0, 10) != value) throw ArgumentError('Некорректная дата');
     }
+    final labelKeys = fields.containsKey('label_keys') ? TaskLabels.keys(fields['label_keys']) : null;
     final checklist = fields.containsKey('checklist') ? Checklists.normalize(fields['checklist']) : null;
     await db.transaction((tx) async {
       final row = (await tx.query('account_tasks', where: 'local_id=?', whereArgs: [id])).single;
       final changed = <String, Object?>{};
       for (final field in fields.entries) {
+        if (field.key == 'label_keys') {
+          if (row['labels_json'] != jsonEncode(labelKeys)) changed['label_keys'] = labelKeys;
+          continue;
+        }
         if (field.key == 'checklist') {
           if (row['checklist_json'] != jsonEncode(checklist)) changed['checklist'] = checklist;
           continue;
@@ -184,6 +273,7 @@ class AccountStore {
         throw ArgumentError('Правка слишком большая для API. Сократи текст или сохрани описание и чек-лист отдельно.');
       }
       final values = <String, Object?>{...changed};
+      if (values.containsKey('label_keys')) values['labels_json'] = jsonEncode(values.remove('label_keys'));
       if (values.containsKey('checklist')) values['checklist_json'] = jsonEncode(values.remove('checklist'));
       await tx.update('account_tasks', values, where: 'local_id=?', whereArgs: [id]);
       await tx.insert('account_queue', {'operation_uuid': operationUuid(), 'local_id': id,
@@ -201,7 +291,7 @@ class AccountStore {
       (SELECT 1 FROM account_comments c WHERE c.task_local_id=t.local_id AND c.state!='sent')
     ORDER BY t.server_id IS NULL DESC, t.server_id DESC
   ''');
-  Future<int> pendingCount() async => (await db.rawQuery("SELECT (SELECT COUNT(*) FROM account_queue) + (SELECT COUNT(*) FROM account_comments WHERE state!='sent') AS n")).single['n'] as int;
+  Future<int> pendingCount() async => (await db.rawQuery("SELECT (SELECT COUNT(*) FROM account_queue) + (SELECT COUNT(*) FROM account_comments WHERE state!='sent') + (SELECT COUNT(*) FROM account_labels WHERE state!='sent') AS n")).single['n'] as int;
 
   Future<void> add(String title) async {
     final text = title.trim();
@@ -240,7 +330,16 @@ class AccountStore {
       if (task['server_id'] == null || task['server_version'] == null) throw StateError('Нет серверной версии');
       body.addAll({'task_id': task['server_id'], 'expected_version': task['server_version']});
       if (row['kind'] == 'edit') {
-        body['fields'] = jsonDecode(row['fields'] as String);
+        final fields = Map<String, dynamic>.from(jsonDecode(row['fields'] as String) as Map);
+        if (fields.containsKey('label_keys')) {
+          try {
+            fields['label_ids'] = TaskLabels.keys(fields.remove('label_keys')).map(TaskLabels.id).toList();
+          } on ArgumentError {
+            await tx.update('account_queue', {'blocked': 1, 'error': 'Метка ещё не отправлена. Проверь каталог меток.'}, where: 'sequence=?', whereArgs: [row['sequence']]);
+            return {...row, 'blocked': 1};
+          }
+        }
+        body['fields'] = fields;
       } else {
         body['status'] = row['status'];
       }
@@ -273,7 +372,14 @@ class AccountStore {
   });
 
   /// Commit the complete scan at once. Never overwrite pending local changes.
-  Future<void> merge(List<Map<String, dynamic>> snapshot, {List<Map<String, dynamic>>? projects}) => db.transaction((tx) async {
+  Future<void> merge(List<Map<String, dynamic>> snapshot, {List<Map<String, dynamic>>? projects, List<Map<String, dynamic>>? labels}) => db.transaction((tx) async {
+    if (labels != null) {
+      await tx.delete('account_labels', where: "state='sent'");
+      for (final label in labels) {
+        final pending = await tx.query('account_labels', where: 'name=?', whereArgs: [label['name']]);
+        await _resolveLabel(tx, pending.isEmpty ? 'server-label-${label['id']}' : pending.single['local_id'] as String, label);
+      }
+    }
     if (projects != null) {
       await tx.delete('account_projects');
       for (final project in projects) {
