@@ -143,6 +143,12 @@ class WorkspaceApi {
     return result;
   }
 
+  Future<List<Map<String,dynamic>>> attachments(String token,int taskId) async {
+    final data=(await _transport('GET','tasks/$taskId/attachments',token,null))['data'];
+    if(data is! List) throw const ApiFailure(0,'Некорректный список файлов.');
+    return data.map((file)=>Map<String,dynamic>.from(file as Map)).toList();
+  }
+
   Future<void> revoke(String token) async {
     await _transport('DELETE', 'auth/token', token, null);
   }

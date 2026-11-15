@@ -2,11 +2,15 @@ import 'dart:convert';
 import 'account_store.dart';
 import 'workspace_api.dart';
 import 'comments_sync.dart';
+import 'attachment_files.dart';
+import 'attachments_sync.dart';
+import 'file_transfers.dart';
 
 class AccountSync {
   final WorkspaceApi api;
   final AccountStore store;
-  AccountSync(this.api, this.store);
+  final AttachmentTransport files;
+  AccountSync(this.api, this.store, {AttachmentTransport? transport}) : files=transport??NativeFileTransfers();
   Future<void> pull(String token) async {
     final tasks = <Map<String, dynamic>>[];
     int after = 0;
@@ -100,7 +104,22 @@ class AccountSync {
           rethrow;
         }
       }
+      final uploaded=<String>{};
+      while(true) {
+        final op=await store.prepareAttachment();if(op==null)break;
+        try {
+          await AttachmentFiles(store).verify(op);
+          final receipt=await files.upload(token,op);await store.acknowledgeAttachment(op,receipt);
+          uploaded.add(op['task_local_id'] as String);sent++;
+        }on ApiFailure catch(error) {
+          if([404,409,413,422].contains(error.status)) {await store.blockAttachment(op['local_id'] as String,error.message);continue;}
+          rethrow;
+        }on ArgumentError catch(error) {await store.blockAttachment(op['local_id'] as String,error.message.toString());}
+      }
       await pull(token);
+      for(final id in uploaded) {
+        try {await AttachmentsSync.refresh(api,store,token,id);}on ApiFailure catch(error){if(error.status!=404)rethrow;}
+      }
       for (final id in touched) {
         try { await CommentsSync.refresh(api, store, token, id); }
         on ApiFailure catch (error) { if (error.status != 404) rethrow; }

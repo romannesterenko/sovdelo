@@ -11,7 +11,8 @@ class ApiAccess {
   abort_unless($token->can('workspace:read'),403,'Нет доступа на чтение.');
   if(!$r->isMethodSafe()&&!$r->is('api/v1/auth/*'))abort_unless($token->can('workspace:write'),403,'Токен разрешает только чтение.');
   if(app()->environment('production'))abort_unless($r->isSecure(),403,'Для API требуется HTTPS.');
-  if(strlen($r->getContent())>131072)abort(413,'Слишком большой запрос.');
+  if($r->routeIs('api.attachments.upload')){abort_if((int)$r->header('Content-Length',0)>12*1024*1024,413,'Слишком большой файл.');}
+  elseif(strlen($r->getContent())>131072)abort(413,'Слишком большой запрос.');
   return $next($r);
  }
 }

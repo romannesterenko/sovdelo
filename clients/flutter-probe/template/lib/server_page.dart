@@ -14,6 +14,8 @@ import 'checklists.dart';
 import 'comments_dialog.dart';
 import 'labels_dialog.dart';
 import 'task_labels.dart';
+import 'attachments_dialog.dart';
+import 'attachment_files.dart';
 
 class SecureTokenVault implements TokenVault {
   final storage = const FlutterSecureStorage();
@@ -71,6 +73,7 @@ class _ServerPageState extends State<ServerPage> {
     if (Platform.isLinux || Platform.isWindows) ffi.sqfliteFfiInit();
     store = await AccountStore.open(Platform.isAndroid ? native.databaseFactory : ffi.databaseFactoryFfi,
         p.join(directory.path, 'production-account-$id-v1.sqlite3'));
+    await AttachmentFiles(store!).cleanOrphans();
     await reload();
   }
 
@@ -191,7 +194,7 @@ class _ServerPageState extends State<ServerPage> {
           'Метки на сайте: ${(remote['labels'] as List? ?? []).map((l) => l['name']).join(', ')}\n'
           'Приоритет: ${remote['priority']}\n${remote['description'] ?? ''}\n'
           'Чек-лист:\n${(remote['checklist'] as List? ?? []).map((i) => '${i['done'] == true ? '✓' : '○'} ${i['text']}').join('\n')}\n\n'
-          'Принять все поля версии сайта и удалить ожидающие правки полей этой задачи? Комментарии сохранятся.'))),
+          'Принять все поля версии сайта и удалить ожидающие правки полей этой задачи? Комментарии и вложения сохранятся.'))),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Оставить конфликт')),
         FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Принять сайт')),
@@ -271,6 +274,16 @@ class _ServerPageState extends State<ServerPage> {
         avatar: Icon(Icons.label, size: 16, color: Color(TaskLabels.colors[label?['color']] ?? 0xff929a9e)));
     })]);
   }
+
+  Future<void> openAttachments(Map<String,Object?> task) => perform(() async {
+    await showDialog<void>(context:context,barrierDismissible:false,builder:(_)=>AttachmentsDialog(
+      store:store!,api:api,token:token!,localId:task['local_id'] as String,taskTitle:task['title'] as String,
+      canWrite:canWrite,synchronize:() async {await AccountSync(api,store!).synchronize(token!,write:canWrite);},
+    ));await reload();
+  });
+
+  int fileCount(Map<String,Object?> task) => task['remote_json']==null?0:
+      ((jsonDecode(task['remote_json'] as String) as Map)['attachments_count'] as int? ?? 0);
 
   Future<void> openComments(Map<String, Object?> task) => perform(() async {
     await showDialog<void>(context: context, barrierDismissible: false, builder: (_) => CommentsDialog(
@@ -371,6 +384,8 @@ class _ServerPageState extends State<ServerPage> {
                   TextButton(onPressed: busy ? null : () => openComments(task),
                     child: Text('Комментарии (${commentCount(task)})')),
                   if ((task['pending_comments'] as int) > 0) Text('Ожидает комментариев: ${task['pending_comments']}'),
+                  TextButton(onPressed:busy?null:()=>openAttachments(task),child:Text('Файлы (${fileCount(task)})')),
+                  if((task['pending_attachments'] as int)>0)Text('Ожидает файлов: ${task['pending_attachments']}'),
                   if (task['remote_json'] != null) TextButton(
                     onPressed: () => showDetails(Map<String, dynamic>.from(jsonDecode(task['remote_json'] as String) as Map)),
                     child: const Text('Детали с сайта')),

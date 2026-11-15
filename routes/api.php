@@ -1,6 +1,6 @@
 <?php
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\Api\{AuthController,WorkspaceController,SyncController};
+use App\Http\Controllers\Api\{AuthController,WorkspaceController,SyncController,AttachmentsController};
 use App\Http\Middleware\ApiAccess;
 use Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful;
 Route::prefix('v1')->withoutMiddleware(EnsureFrontendRequestsAreStateful::class)->group(function(){
@@ -8,6 +8,9 @@ Route::prefix('v1')->withoutMiddleware(EnsureFrontendRequestsAreStateful::class)
  Route::middleware(['auth:sanctum',ApiAccess::class,'throttle:workspace-api'])->group(function(){
   Route::get('/tasks/{task}/comments',[SyncController::class,'comments'])->whereNumber('task');
   Route::get('/labels',[SyncController::class,'labels']);
+  Route::get('/tasks/{task}/attachments',[AttachmentsController::class,'index'])->whereNumber('task');
+  Route::post('/tasks/{task}/attachments',[AttachmentsController::class,'upload'])->whereNumber('task')->name('api.attachments.upload');
+  Route::get('/tasks/{task}/attachments/{attachment}',[AttachmentsController::class,'download'])->whereNumber('task')->whereNumber('attachment');
   Route::get('/sync/tasks',[SyncController::class,'tasks']);
   Route::post('/sync/operations',[SyncController::class,'operation']);
   Route::get('/me',[AuthController::class,'me']);

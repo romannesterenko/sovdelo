@@ -16,7 +16,7 @@ class AccountStore {
   final Database db;
   AccountStore(this.db);
   static Future<AccountStore> open(DatabaseFactory factory, String path) async {
-    final db = await factory.openDatabase(path, options: OpenDatabaseOptions(version: 5, onCreate: (db, version) async {
+    final db = await factory.openDatabase(path, options: OpenDatabaseOptions(version: 6, onCreate: (db, version) async {
       await db.execute('CREATE TABLE account_tasks ('
           'local_id TEXT PRIMARY KEY, server_id INTEGER UNIQUE, server_version INTEGER, '
           'title TEXT NOT NULL, status TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, remote_json TEXT)');
@@ -29,11 +29,13 @@ class AccountStore {
       await _addChecklist(db);
       await _addComments(db);
       await _addLabels(db);
+      await _addAttachments(db);
     }, onUpgrade: (db, old, version) async {
       if (old < 2) await _addDetails(db);
       if (old < 3) await _addChecklist(db);
       if (old < 4) await _addComments(db);
       if (old < 5) await _addLabels(db);
+      if (old < 6) await _addAttachments(db);
     }));
     return AccountStore(db);
   }
@@ -154,6 +156,80 @@ class AccountStore {
   Future<void> retryLabel(String key) async {
     await db.update('account_labels', {'state': 'pending', 'error': null}, where: "local_id=? AND state='blocked'", whereArgs: [key]);
   }
+
+  static Future<void> _addAttachments(DatabaseExecutor db) async {
+    await db.execute('CREATE TABLE account_attachments ('
+      'local_id TEXT PRIMARY KEY, server_id INTEGER UNIQUE, task_local_id TEXT NOT NULL, '
+      'name TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT, local_path TEXT, '
+      'state TEXT NOT NULL, request_json TEXT, error TEXT, created_at TEXT NOT NULL)');
+    await db.execute('CREATE INDEX attachments_task ON account_attachments(task_local_id,state)');
+  }
+
+  Future<List<Map<String, Object?>>> attachments(String id) => db.query('account_attachments',
+    where: 'task_local_id=?', whereArgs: [id], orderBy: 'server_id IS NULL, server_id, created_at');
+
+  Future<void> addAttachment(String taskId, String key, String name, String path, int bytes, String sha) async {
+    await db.transaction((tx) async {
+      if ((await tx.query('account_tasks', where: 'local_id=?', whereArgs: [taskId])).isEmpty) throw StateError('Нет задачи');
+      if ((await tx.query('account_attachments', where: 'task_local_id=?', whereArgs: [taskId])).length >= 50) throw ArgumentError('До 50 файлов на задачу');
+      await tx.insert('account_attachments', {'local_id': key, 'task_local_id': taskId, 'name': name,
+        'bytes': bytes, 'sha256': sha, 'local_path': path, 'state': 'pending', 'created_at': DateTime.now().toUtc().toIso8601String()});
+    });
+  }
+
+  Future<Map<String, Object?>?> prepareAttachment() => db.transaction((tx) async {
+    final rows = await tx.rawQuery("SELECT a.*,t.server_id AS task_server_id FROM account_attachments a JOIN account_tasks t ON t.local_id=a.task_local_id "
+      "WHERE a.state='pending' AND t.server_id IS NOT NULL ORDER BY a.created_at,a.local_id LIMIT 1");
+    if (rows.isEmpty) return null;
+    final row = rows.single;
+    if (row['request_json'] != null) return row;
+    final body = jsonEncode({'task_id': row['task_server_id'], 'operation_uuid': row['local_id'], 'name': row['name'], 'sha256': row['sha256']});
+    await tx.update('account_attachments', {'request_json': body}, where: 'local_id=?', whereArgs: [row['local_id']]);
+    return {...row, 'request_json': body};
+  });
+  Future<void> acknowledgeAttachment(Map<String, Object?> op, Map<String, dynamic> receipt) async {
+    if (receipt['operation_uuid'] != op['local_id'] || receipt['attachment'] is! Map) throw StateError('Нет подтверждения файла');
+    final file = Map<String, dynamic>.from(receipt['attachment'] as Map);
+    if (file['uuid'] != op['local_id'] || file['sha256'] != op['sha256'] || file['bytes'] != op['bytes']) throw StateError('Подтверждён другой файл');
+    await db.update('account_attachments', {'server_id': file['id'], 'state': 'sent', 'error': null, 'created_at': file['created_at']},
+      where: 'local_id=?', whereArgs: [op['local_id']]);
+  }
+  Future<void> blockAttachment(String key, String message) async {
+    await db.update('account_attachments', {'state': 'blocked', 'error': message}, where: 'local_id=?', whereArgs: [key]);
+  }
+  Future<void> retryAttachment(String key) async {
+    await db.update('account_attachments', {'state': 'pending', 'error': null}, where: "local_id=? AND state='blocked'", whereArgs: [key]);
+  }
+  Future<void> discardAttachment(String key) async {
+    await db.delete('account_attachments', where: "local_id=? AND state='blocked'", whereArgs: [key]);
+  }
+  Future<void> cacheAttachment(String key, String path, String sha) async {
+    await db.update('account_attachments', {'local_path': path, 'sha256': sha}, where: 'local_id=?', whereArgs: [key]);
+  }
+  Future<void> uncacheAttachment(String key) async {
+    await db.update('account_attachments', {'local_path': null}, where: "local_id=? AND state='sent'", whereArgs: [key]);
+  }
+  Future<void> mergeAttachments(String id, List<Map<String, dynamic>> snapshot) => db.transaction((tx) async {
+    final seen = <int>{};
+    for (final file in snapshot) {
+      seen.add(file['id'] as int);
+      final key = file['uuid'] as String? ?? 'server-file-${file['id']}';
+      final existing = await tx.query('account_attachments', where: 'task_local_id=? AND (local_id=? OR server_id=?)', whereArgs: [id,key,file['id']]);
+      final values = <String,Object?>{'server_id': file['id'],'task_local_id': id,'name': file['name'],'bytes': file['bytes'],
+        'state': 'sent','error': null,'created_at': file['created_at']};
+      if (file['sha256'] != null) values['sha256']=file['sha256'];
+      if (existing.isEmpty) await tx.insert('account_attachments', {...values,'local_id':key});
+      else await tx.update('account_attachments',values,where:'local_id=?',whereArgs:[existing.single['local_id']]);
+    }
+    for (final file in await tx.query('account_attachments', where: "task_local_id=? AND state='sent'", whereArgs: [id])) {
+      if (!seen.contains(file['server_id'])) await tx.delete('account_attachments',where:'local_id=?',whereArgs:[file['local_id']]);
+    }
+    final task = (await tx.query('account_tasks',where:'local_id=?',whereArgs:[id])).single;
+    if (task['remote_json'] != null) {
+      final remote=Map<String,dynamic>.from(jsonDecode(task['remote_json'] as String) as Map);remote['attachments_count']=snapshot.length;
+      await tx.update('account_tasks',{'remote_json':jsonEncode(remote)},where:'local_id=?',whereArgs:[id]);
+    }
+  });
 
   Future<Map<String, Object?>> task(String localId) async =>
       (await db.query('account_tasks', where: 'local_id=?', whereArgs: [localId])).single;
@@ -285,13 +361,15 @@ class AccountStore {
     SELECT t.*, (SELECT COUNT(*) FROM account_queue q WHERE q.local_id=t.local_id) AS pending,
       (SELECT MAX(blocked) FROM account_queue q WHERE q.local_id=t.local_id) AS blocked,
       (SELECT error FROM account_queue q WHERE q.local_id=t.local_id AND blocked=1 LIMIT 1) AS error,
-      (SELECT COUNT(*) FROM account_comments c WHERE c.task_local_id=t.local_id AND c.state!='sent') AS pending_comments
+      (SELECT COUNT(*) FROM account_comments c WHERE c.task_local_id=t.local_id AND c.state!='sent') AS pending_comments,
+      (SELECT COUNT(*) FROM account_attachments a WHERE a.task_local_id=t.local_id AND a.state!='sent') AS pending_attachments
     FROM account_tasks t WHERE t.active=1 OR EXISTS
       (SELECT 1 FROM account_queue q WHERE q.local_id=t.local_id) OR EXISTS
-      (SELECT 1 FROM account_comments c WHERE c.task_local_id=t.local_id AND c.state!='sent')
+      (SELECT 1 FROM account_comments c WHERE c.task_local_id=t.local_id AND c.state!='sent') OR EXISTS
+      (SELECT 1 FROM account_attachments a WHERE a.task_local_id=t.local_id AND a.state!='sent')
     ORDER BY t.server_id IS NULL DESC, t.server_id DESC
   ''');
-  Future<int> pendingCount() async => (await db.rawQuery("SELECT (SELECT COUNT(*) FROM account_queue) + (SELECT COUNT(*) FROM account_comments WHERE state!='sent') + (SELECT COUNT(*) FROM account_labels WHERE state!='sent') AS n")).single['n'] as int;
+  Future<int> pendingCount() async => (await db.rawQuery("SELECT (SELECT COUNT(*) FROM account_queue) + (SELECT COUNT(*) FROM account_comments WHERE state!='sent') + (SELECT COUNT(*) FROM account_labels WHERE state!='sent') + (SELECT COUNT(*) FROM account_attachments WHERE state!='sent') AS n")).single['n'] as int;
 
   Future<void> add(String title) async {
     final text = title.trim();
@@ -413,6 +491,7 @@ class AccountStore {
   });
 
   Future<void> discardMissing(String localId) => db.transaction((tx) async {
+    await tx.delete('account_attachments', where: "task_local_id=? AND state!='sent'", whereArgs: [localId]);
     await tx.delete('account_comments', where: "task_local_id=? AND state!='sent'", whereArgs: [localId]);
     await tx.delete('account_queue', where: 'local_id=?', whereArgs: [localId]);
     await tx.update('account_tasks', {'active': 0}, where: 'local_id=?', whereArgs: [localId]);

@@ -798,4 +798,40 @@ class WorkspaceTest extends TestCase {
   $body['fields']['label_ids']=[$foreign->id,$foreign->id];$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertUnprocessable();
   $this->assertSame('Не менять',$t->fresh()->title);$this->assertDatabaseCount('api_requests',0);
  }
+ private function uploadApiFile(string $token,int $task,\Illuminate\Http\UploadedFile $file,string $key,?string $sha=null){
+  $this->app['auth']->forgetGuards();return $this->post('/api/v1/tasks/'.$task.'/attachments',[
+   'operation_uuid'=>$key,'name'=>$file->getClientOriginalName(),'sha256'=>$sha??hash_file('sha256',$file->getRealPath()),'file'=>$file
+  ],['Authorization'=>'Bearer '.$token,'Accept'=>'application/json']);
+ }
+ public function test_api_attachment_upload_replay_does_not_duplicate_blob_even_at_quota():void {
+  \Illuminate\Support\Facades\Storage::fake('local');$u=$this->account();$token=$this->deviceToken($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Файлы']);$key=(string)\Illuminate\Support\Str::uuid();
+  $make=fn()=>\Illuminate\Http\UploadedFile::fake()->createWithContent('note.txt','hello world');
+  $data=$this->uploadApiFile($token,$t->id,$make(),$key)->assertCreated()->assertJsonMissingPath('data.attachment.path')->assertJsonPath('data.attachment.sha256',hash('sha256','hello world'))->json('data');
+  for($i=0;$i<49;$i++)\App\Models\TaskAttachment::create(['task_id'=>$t->id,'name'=>'dummy.txt','path'=>'dummy/'.$i,'bytes'=>1]);
+  $this->uploadApiFile($token,$t->id,$make(),$key)->assertCreated()->assertExactJson(['data'=>$data,'meta'=>['api_version'=>'1']]);
+  $this->uploadApiFile($token,$t->id,$make(),(string)\Illuminate\Support\Str::uuid())->assertUnprocessable();
+  $this->assertDatabaseCount('task_attachments',50);$this->assertCount(1,\Illuminate\Support\Facades\Storage::disk('local')->allFiles());
+  $this->uploadApiFile($token,$t->id,\Illuminate\Http\UploadedFile::fake()->createWithContent('note.txt','different'),$key)->assertConflict();
+ }
+ public function test_api_attachment_listing_download_and_owner_scope():void {
+  \Illuminate\Support\Facades\Storage::fake('local');$a=$this->account();$b=$this->account('files-other@example.com');$token=$this->deviceToken($a);$t=Task::create(['user_id'=>$a->id,'title'=>'Файл']);
+  $id=$this->uploadApiFile($token,$t->id,\Illuminate\Http\UploadedFile::fake()->createWithContent('note.txt','hello world'),(string)\Illuminate\Support\Str::uuid())->assertCreated()->json('data.attachment.id');
+  $read=$this->deviceToken($a,false);$this->apiCall('GET','/api/v1/tasks/'.$t->id.'/attachments',$read)->assertOk()->assertJsonCount(1,'data')->assertJsonPath('data.0.name','note.txt')->assertJsonMissingPath('data.0.path');
+  $this->apiCall('GET','/api/v1/tasks/'.$t->id.'/attachments/'.$id,$read)->assertOk()->assertDownload('note.txt')->assertHeader('X-File-SHA256',hash('sha256','hello world'));
+  $this->apiCall('GET','/api/v1/tasks/'.$t->id.'/attachments',$this->deviceToken($b))->assertNotFound();
+  $this->apiCall('GET','/api/v1/tasks/'.$t->id.'/attachments/'.$id,$this->deviceToken($b))->assertNotFound();
+  $other=Task::create(['user_id'=>$a->id,'title'=>'Другая']);$this->apiCall('GET','/api/v1/tasks/'.$other->id.'/attachments/'.$id,$read)->assertNotFound();
+ }
+ public function test_api_attachment_validates_hash_type_size_and_write_access():void {
+  \Illuminate\Support\Facades\Storage::fake('local');$u=$this->account();$t=Task::create(['user_id'=>$u->id,'title'=>'Проверка']);$token=$this->deviceToken($u);
+  $this->uploadApiFile($token,$t->id,\Illuminate\Http\UploadedFile::fake()->createWithContent('note.txt','text'),(string)\Illuminate\Support\Str::uuid(),str_repeat('0',64))->assertUnprocessable();
+  $this->uploadApiFile($token,$t->id,\Illuminate\Http\UploadedFile::fake()->createWithContent('code.php','<?php echo 1;'),(string)\Illuminate\Support\Str::uuid())->assertUnprocessable();
+  $this->uploadApiFile($token,$t->id,\Illuminate\Http\UploadedFile::fake()->create('big.txt',10241,'text/plain'),(string)\Illuminate\Support\Str::uuid())->assertUnprocessable();
+  $this->uploadApiFile($this->deviceToken($u,false),$t->id,\Illuminate\Http\UploadedFile::fake()->createWithContent('note.txt','text'),(string)\Illuminate\Support\Str::uuid())->assertForbidden();
+  $this->assertDatabaseCount('task_attachments',0);$this->assertCount(0,\Illuminate\Support\Facades\Storage::disk('local')->allFiles());
+ }
+ public function test_api_attachment_allows_binary_larger_than_json_body_limit():void {
+  \Illuminate\Support\Facades\Storage::fake('local');$u=$this->account();$t=Task::create(['user_id'=>$u->id,'title'=>'Большой текст']);
+  $this->uploadApiFile($this->deviceToken($u),$t->id,\Illuminate\Http\UploadedFile::fake()->createWithContent('large.txt',str_repeat('hello world ',16000)),(string)\Illuminate\Support\Str::uuid())->assertCreated();
+ }
 }
