@@ -131,6 +131,12 @@ class WorkspaceApi {
     return Map<String, dynamic>.from(data);
   }
 
+  Future<Map<String, dynamic>> comments(String token, int taskId, int after, int? through) async {
+    final result = await _transport('GET', 'tasks/$taskId/comments?after_id=$after${through == null ? '' : '&through_id=$through'}', token, null);
+    if (result['data'] is! List || result['meta'] is! Map) throw const ApiFailure(0, 'Некорректная история комментариев.');
+    return result;
+  }
+
   Future<void> revoke(String token) async {
     await _transport('DELETE', 'auth/token', token, null);
   }

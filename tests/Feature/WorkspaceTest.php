@@ -724,4 +724,43 @@ class WorkspaceTest extends TestCase {
   $this->apiCall('POST','/api/v1/sync/operations',$token,['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'edit','task_id'=>$t->id,'expected_version'=>$old,'fields'=>['checklist'=>[['text'=>'С телефона','done'=>false]]]])->assertConflict();
   $this->assertSame([['text'=>'С сайта','done'=>true]],$t->fresh()->checklist);$this->assertDatabaseCount('api_requests',0);
  }
+ public function test_sync_comment_retry_does_not_duplicate_and_does_not_change_task_version():void {
+  $u=$this->account();$token=$this->deviceToken($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Обсуждение']);$version=$t->version;
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'comment','task_id'=>$t->id,'comment_body'=>'Первое сообщение'];
+  $result=$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertCreated()->assertJsonPath('data.comment.body','Первое сообщение')->assertJsonPath('data.comment.uuid',$body['operation_uuid'])->json('data');
+  app(\App\Services\TaskOrder::class)->update($u->id,$t->id,['description'=>'Новая правка']);
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertCreated()->assertExactJson(['data'=>$result,'meta'=>['api_version'=>'1']]);
+  $this->assertSame($version+1,$t->fresh()->version);$this->assertDatabaseCount('task_comments',1);
+  $body['comment_body']='Другой текст';$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertConflict();
+  $this->assertDatabaseCount('task_comments',1);
+ }
+ public function test_api_comment_history_has_cursor_and_includes_web_edits_and_deletions():void {
+  $u=$this->account();$token=$this->deviceToken($u,false);$t=Task::create(['user_id'=>$u->id,'title'=>'История']);$ids=[];
+  for($i=0;$i<52;$i++)$ids[]=\App\Models\TaskComment::create(['user_id'=>$u->id,'task_id'=>$t->id,'body'=>'Пункт '.$i])->id;
+  $first=$this->apiCall('GET','/api/v1/tasks/'.$t->id.'/comments',$token)->assertOk()->assertJsonCount(50,'data')->assertJsonPath('meta.has_more',true)->assertJsonPath('data.0.author',$u->name)->json();
+  \App\Models\TaskComment::findOrFail($ids[0])->update(['body'=>'Отредактирован на сайте']);
+  \App\Models\TaskComment::findOrFail($ids[1])->delete();
+  \App\Models\TaskComment::create(['user_id'=>$u->id,'task_id'=>$t->id,'body'=>'Позже']);
+  $this->apiCall('GET','/api/v1/tasks/'.$t->id.'/comments?after_id='.$first['meta']['after_id'].'&through_id='.$first['meta']['through_id'],$token)->assertOk()->assertJsonCount(2,'data')->assertJsonPath('meta.has_more',false);
+  $this->apiCall('GET','/api/v1/tasks/'.$t->id.'/comments',$token)->assertOk()->assertJsonPath('data.0.body','Отредактирован на сайте');
+ }
+ public function test_api_comment_ownership_validation_and_read_only_token():void {
+  $a=$this->account();$b=$this->account('comments-other@example.com');$t=Task::create(['user_id'=>$a->id,'title'=>'Личное']);
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'comment','task_id'=>$t->id,'comment_body'=>'Текст'];
+  $this->apiCall('GET','/api/v1/tasks/'.$t->id.'/comments',$this->deviceToken($b))->assertNotFound();
+  $this->apiCall('POST','/api/v1/sync/operations',$this->deviceToken($b),$body)->assertNotFound();
+  $this->apiCall('POST','/api/v1/sync/operations',$this->deviceToken($a,false),$body)->assertForbidden();
+  $token=$this->deviceToken($a);
+  foreach(['',str_repeat('я',10001)] as $text){$body['comment_body']=$text;$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertUnprocessable();}
+  $body['comment_body']='Допустимый';$body['expected_version']=1;$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertUnprocessable();
+  $this->assertDatabaseCount('task_comments',0);
+ }
+ public function test_sync_comment_on_archived_task_and_retry_after_trash():void {
+  $u=$this->account();$token=$this->deviceToken($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Архив']);$t->archived_at=now();$t->save();
+  $body=['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'comment','task_id'=>$t->id,'comment_body'=>'Сохранить'];
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertCreated();$t->delete();
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertCreated();
+  $body['operation_uuid']=(string)\Illuminate\Support\Str::uuid();$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertNotFound();
+  $this->assertDatabaseCount('task_comments',1);
+ }
 }

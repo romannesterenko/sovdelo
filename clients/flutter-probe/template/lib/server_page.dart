@@ -11,6 +11,7 @@ import 'account_store.dart';
 import 'account_sync.dart';
 import 'task_editor.dart';
 import 'checklists.dart';
+import 'comments_dialog.dart';
 
 class SecureTokenVault implements TokenVault {
   final storage = const FlutterSecureStorage();
@@ -184,7 +185,7 @@ class _ServerPageState extends State<ServerPage> {
           'Проект: ${remote['project_id'] ?? 'без проекта'} · срок: ${remote['due_date'] ?? 'нет'}\n'
           'Приоритет: ${remote['priority']}\n${remote['description'] ?? ''}\n'
           'Чек-лист:\n${(remote['checklist'] as List? ?? []).map((i) => '${i['done'] == true ? '✓' : '○'} ${i['text']}').join('\n')}\n\n'
-          'Принять все поля версии сайта и удалить ожидающие изменения этой задачи?'))),
+          'Принять все поля версии сайта и удалить ожидающие правки полей этой задачи? Комментарии сохранятся.'))),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Оставить конфликт')),
         FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Принять сайт')),
@@ -244,6 +245,24 @@ class _ServerPageState extends State<ServerPage> {
       ))),
       actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Закрыть'))],
     ));
+  }
+
+  Future<void> openComments(Map<String, Object?> task) => perform(() async {
+    await showDialog<void>(context: context, barrierDismissible: false, builder: (_) => CommentsDialog(
+      store: store!, api: api, token: token!, localId: task['local_id'] as String,
+      taskTitle: task['title'] as String, author: (profile?['name'] ?? profile?['email'] ?? 'Я').toString(),
+      canWrite: canWrite,
+      synchronize: () async {
+        // Keep the dialog open on 401 so its local text remains visible; parent handles re-login afterwards.
+        await AccountSync(api, store!).synchronize(token!, write: canWrite);
+      },
+    ));
+    await reload();
+  });
+
+  int commentCount(Map<String, Object?> task) {
+    if (task['remote_json'] == null) return 0;
+    return (jsonDecode(task['remote_json'] as String) as Map)['comments_count'] as int? ?? 0;
   }
 
   Widget checklistProgress(Map<String, Object?> task) {
@@ -322,6 +341,9 @@ class _ServerPageState extends State<ServerPage> {
                         : (status) { if (status != null) editStatus(task, status); }),
                   TextButton(onPressed: busy || !canWrite || task['blocked'] == 1 ? null : () => editTask(task),
                     child: const Text('Редактировать')),
+                  TextButton(onPressed: busy ? null : () => openComments(task),
+                    child: Text('Комментарии (${commentCount(task)})')),
+                  if ((task['pending_comments'] as int) > 0) Text('Ожидает комментариев: ${task['pending_comments']}'),
                   if (task['remote_json'] != null) TextButton(
                     onPressed: () => showDetails(Map<String, dynamic>.from(jsonDecode(task['remote_json'] as String) as Map)),
                     child: const Text('Детали с сайта')),

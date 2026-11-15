@@ -6,6 +6,7 @@ use Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful;
 Route::prefix('v1')->withoutMiddleware(EnsureFrontendRequestsAreStateful::class)->group(function(){
  Route::post('/auth/token',[AuthController::class,'login'])->middleware('throttle:api-login');
  Route::middleware(['auth:sanctum',ApiAccess::class,'throttle:workspace-api'])->group(function(){
+  Route::get('/tasks/{task}/comments',[SyncController::class,'comments'])->whereNumber('task');
   Route::get('/sync/tasks',[SyncController::class,'tasks']);
   Route::post('/sync/operations',[SyncController::class,'operation']);
   Route::get('/me',[AuthController::class,'me']);

@@ -15,7 +15,7 @@ class AccountStore {
   final Database db;
   AccountStore(this.db);
   static Future<AccountStore> open(DatabaseFactory factory, String path) async {
-    final db = await factory.openDatabase(path, options: OpenDatabaseOptions(version: 3, onCreate: (db, version) async {
+    final db = await factory.openDatabase(path, options: OpenDatabaseOptions(version: 4, onCreate: (db, version) async {
       await db.execute('CREATE TABLE account_tasks ('
           'local_id TEXT PRIMARY KEY, server_id INTEGER UNIQUE, server_version INTEGER, '
           'title TEXT NOT NULL, status TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, remote_json TEXT)');
@@ -26,9 +26,11 @@ class AccountStore {
       await db.execute('CREATE INDEX queue_task ON account_queue(local_id, sequence)');
       await _addDetails(db);
       await _addChecklist(db);
+      await _addComments(db);
     }, onUpgrade: (db, old, version) async {
       if (old < 2) await _addDetails(db);
       if (old < 3) await _addChecklist(db);
+      if (old < 4) await _addComments(db);
     }));
     return AccountStore(db);
   }
@@ -60,6 +62,90 @@ class AccountStore {
           where: 'local_id=?', whereArgs: [row['local_id']]);
     }
   }
+
+  static Future<void> _addComments(DatabaseExecutor db) async {
+    await db.execute('CREATE TABLE account_comments ('
+        'local_id TEXT PRIMARY KEY, server_id INTEGER UNIQUE, task_local_id TEXT NOT NULL, '
+        'body TEXT NOT NULL, author TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, '
+        'state TEXT NOT NULL, request_json TEXT, error TEXT)');
+    await db.execute('CREATE INDEX comments_task ON account_comments(task_local_id, state)');
+  }
+
+  Future<Map<String, Object?>> task(String localId) async =>
+      (await db.query('account_tasks', where: 'local_id=?', whereArgs: [localId])).single;
+
+  Future<List<Map<String, Object?>>> comments(String localId) => db.query('account_comments',
+      where: 'task_local_id=?', whereArgs: [localId], orderBy: 'server_id IS NULL, server_id, created_at, local_id');
+
+  Future<void> addComment(String localId, String body, String author) async {
+    final text = body.trim();
+    if (text.isEmpty || text.length > 10000) throw ArgumentError('Комментарий: от 1 до 10000 символов');
+    await db.transaction((tx) async {
+      if ((await tx.query('account_tasks', where: 'local_id=?', whereArgs: [localId])).isEmpty) throw StateError('Нет задачи');
+      final now = DateTime.now().toUtc().toIso8601String();
+      await tx.insert('account_comments', {'local_id': operationUuid(), 'task_local_id': localId,
+        'body': text, 'author': author, 'created_at': now, 'updated_at': now, 'state': 'pending'});
+    });
+  }
+
+  Future<Map<String, Object?>?> prepareComment() => db.transaction((tx) async {
+    final rows = await tx.rawQuery("SELECT c.*, t.server_id AS task_server_id FROM account_comments c "
+        "JOIN account_tasks t ON t.local_id=c.task_local_id "
+        "WHERE c.state='pending' AND t.server_id IS NOT NULL ORDER BY c.created_at,c.local_id LIMIT 1");
+    if (rows.isEmpty) return null;
+    final row = rows.single;
+    if (row['request_json'] != null) return row;
+    final body = jsonEncode({'operation_uuid': row['local_id'], 'kind': 'comment',
+      'task_id': row['task_server_id'], 'comment_body': row['body']});
+    await tx.update('account_comments', {'request_json': body}, where: 'local_id=?', whereArgs: [row['local_id']]);
+    return {...row, 'request_json': body};
+  });
+
+  Future<void> acknowledgeComment(Map<String, Object?> op, Map<String, dynamic> receipt) async {
+    if (receipt['operation_uuid'] != op['local_id'] || receipt['comment'] is! Map) throw StateError('Некорректное подтверждение комментария');
+    final comment = Map<String, dynamic>.from(receipt['comment'] as Map);
+    if (comment['uuid'] != op['local_id'] || comment['task_id'] != op['task_server_id']) throw StateError('Подтверждена другая задача');
+    await db.transaction((tx) async {
+      final rows = await tx.query('account_comments', where: 'local_id=?', whereArgs: [op['local_id']]);
+      if (rows.isEmpty) return;
+      await tx.update('account_comments', {'server_id': comment['id'], 'body': comment['body'],
+        'author': comment['author'], 'created_at': comment['created_at'], 'updated_at': comment['updated_at'],
+        'state': 'sent', 'error': null}, where: 'local_id=?', whereArgs: [op['local_id']]);
+    });
+  }
+
+  Future<void> blockComment(String id, String error) async {
+    await db.update('account_comments', {'state': 'blocked', 'error': error}, where: 'local_id=?', whereArgs: [id]);
+  }
+  Future<void> retryComment(String id) async {
+    await db.update('account_comments', {'state': 'pending', 'error': null}, where: "local_id=? AND state='blocked'", whereArgs: [id]);
+  }
+  Future<void> discardComment(String id) async {
+    await db.delete('account_comments', where: "local_id=? AND state='blocked'", whereArgs: [id]);
+  }
+
+  Future<void> mergeComments(String localId, List<Map<String, dynamic>> snapshot) => db.transaction((tx) async {
+    final owner = (await tx.query('account_tasks', where: 'local_id=?', whereArgs: [localId])).single;
+    if (snapshot.any((c) => c['task_id'] != owner['server_id'])) throw StateError('Комментарии другой задачи');
+    await tx.delete('account_comments', where: "task_local_id=? AND state='sent'", whereArgs: [localId]);
+    for (final comment in snapshot) {
+      final key = comment['uuid'] as String? ?? 'server-comment-${comment['id']}';
+      final existing = await tx.query('account_comments', where: 'task_local_id=? AND (local_id=? OR server_id=?)',
+        whereArgs: [localId, key, comment['id']]);
+      final values = <String, Object?>{'server_id': comment['id'], 'task_local_id': localId, 'body': comment['body'],
+        'author': comment['author'], 'created_at': comment['created_at'], 'updated_at': comment['updated_at'], 'state': 'sent', 'error': null};
+      if (existing.isEmpty) {
+        await tx.insert('account_comments', {...values, 'local_id': key});
+      } else {
+        await tx.update('account_comments', values, where: 'local_id=?', whereArgs: [existing.single['local_id']]);
+      }
+    }
+    if (owner['remote_json'] != null) {
+      final remote = Map<String, dynamic>.from(jsonDecode(owner['remote_json'] as String) as Map);
+      remote['comments_count'] = snapshot.length;
+      await tx.update('account_tasks', {'remote_json': jsonEncode(remote)}, where: 'local_id=?', whereArgs: [localId]);
+    }
+  });
 
   Future<List<Map<String, Object?>>> projects() => db.query('account_projects', orderBy: 'name, id');
 
@@ -108,12 +194,14 @@ class AccountStore {
   Future<List<Map<String, Object?>>> tasks() => db.rawQuery('''
     SELECT t.*, (SELECT COUNT(*) FROM account_queue q WHERE q.local_id=t.local_id) AS pending,
       (SELECT MAX(blocked) FROM account_queue q WHERE q.local_id=t.local_id) AS blocked,
-      (SELECT error FROM account_queue q WHERE q.local_id=t.local_id AND blocked=1 LIMIT 1) AS error
+      (SELECT error FROM account_queue q WHERE q.local_id=t.local_id AND blocked=1 LIMIT 1) AS error,
+      (SELECT COUNT(*) FROM account_comments c WHERE c.task_local_id=t.local_id AND c.state!='sent') AS pending_comments
     FROM account_tasks t WHERE t.active=1 OR EXISTS
-      (SELECT 1 FROM account_queue q WHERE q.local_id=t.local_id)
+      (SELECT 1 FROM account_queue q WHERE q.local_id=t.local_id) OR EXISTS
+      (SELECT 1 FROM account_comments c WHERE c.task_local_id=t.local_id AND c.state!='sent')
     ORDER BY t.server_id IS NULL DESC, t.server_id DESC
   ''');
-  Future<int> pendingCount() async => (await db.rawQuery('SELECT COUNT(*) AS n FROM account_queue')).single['n'] as int;
+  Future<int> pendingCount() async => (await db.rawQuery("SELECT (SELECT COUNT(*) FROM account_queue) + (SELECT COUNT(*) FROM account_comments WHERE state!='sent') AS n")).single['n'] as int;
 
   Future<void> add(String title) async {
     final text = title.trim();
@@ -219,6 +307,7 @@ class AccountStore {
   });
 
   Future<void> discardMissing(String localId) => db.transaction((tx) async {
+    await tx.delete('account_comments', where: "task_local_id=? AND state!='sent'", whereArgs: [localId]);
     await tx.delete('account_queue', where: 'local_id=?', whereArgs: [localId]);
     await tx.update('account_tasks', {'active': 0}, where: 'local_id=?', whereArgs: [localId]);
   });
