@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:math';
+import 'checklists.dart';
 import 'package:sqflite_common/sqlite_api.dart';
 
 String operationUuid() {
@@ -14,7 +15,7 @@ class AccountStore {
   final Database db;
   AccountStore(this.db);
   static Future<AccountStore> open(DatabaseFactory factory, String path) async {
-    final db = await factory.openDatabase(path, options: OpenDatabaseOptions(version: 2, onCreate: (db, version) async {
+    final db = await factory.openDatabase(path, options: OpenDatabaseOptions(version: 3, onCreate: (db, version) async {
       await db.execute('CREATE TABLE account_tasks ('
           'local_id TEXT PRIMARY KEY, server_id INTEGER UNIQUE, server_version INTEGER, '
           'title TEXT NOT NULL, status TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, remote_json TEXT)');
@@ -24,8 +25,10 @@ class AccountStore {
           'body TEXT, blocked INTEGER NOT NULL DEFAULT 0, error TEXT)');
       await db.execute('CREATE INDEX queue_task ON account_queue(local_id, sequence)');
       await _addDetails(db);
+      await _addChecklist(db);
     }, onUpgrade: (db, old, version) async {
       if (old < 2) await _addDetails(db);
+      if (old < 3) await _addChecklist(db);
     }));
     return AccountStore(db);
   }
@@ -33,6 +36,7 @@ class AccountStore {
   static Map<String, Object?> _details(Map<String, dynamic> task) => {
     'description': task['description'], 'due_date': task['due_date'],
     'priority': task['priority'] ?? 'normal', 'project_id': task['project_id'],
+    'checklist_json': jsonEncode(Checklists.fromRemote(task['checklist'] ?? [])),
   };
 
   static Future<void> _addDetails(DatabaseExecutor db) async {
@@ -44,14 +48,23 @@ class AccountStore {
     await db.execute('CREATE TABLE account_projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL)');
     for (final row in await db.query('account_tasks', where: 'remote_json IS NOT NULL')) {
       final remote = Map<String, dynamic>.from(jsonDecode(row['remote_json'] as String) as Map);
-      await db.update('account_tasks', _details(remote), where: 'local_id=?', whereArgs: [row['local_id']]);
+      await db.update('account_tasks', _details(remote)..remove('checklist_json'), where: 'local_id=?', whereArgs: [row['local_id']]);
+    }
+  }
+
+  static Future<void> _addChecklist(DatabaseExecutor db) async {
+    await db.execute("ALTER TABLE account_tasks ADD COLUMN checklist_json TEXT NOT NULL DEFAULT '[]'");
+    for (final row in await db.query('account_tasks', where: 'remote_json IS NOT NULL')) {
+      final remote = Map<String, dynamic>.from(jsonDecode(row['remote_json'] as String) as Map);
+      await db.update('account_tasks', {'checklist_json': jsonEncode(Checklists.fromRemote(remote['checklist'] ?? []))},
+          where: 'local_id=?', whereArgs: [row['local_id']]);
     }
   }
 
   Future<List<Map<String, Object?>>> projects() => db.query('account_projects', orderBy: 'name, id');
 
   Future<void> edit(String id, Map<String, Object?> fields) async {
-    const allowed = {'title', 'description', 'due_date', 'priority', 'project_id'};
+    const allowed = {'title', 'description', 'due_date', 'priority', 'project_id', 'checklist'};
     if (fields.keys.any((key) => !allowed.contains(key))) throw ArgumentError('Неизвестное поле');
     if (fields.containsKey('title') &&
         (fields['title'] is! String || (fields['title'] as String).trim().isEmpty || (fields['title'] as String).length > 240)) {
@@ -68,15 +81,25 @@ class AccountStore {
       final date = value is String ? DateTime.tryParse(value) : null;
       if (date == null || date.year < 1 || date.year > 9999 || date.toIso8601String().substring(0, 10) != value) throw ArgumentError('Некорректная дата');
     }
+    final checklist = fields.containsKey('checklist') ? Checklists.normalize(fields['checklist']) : null;
     await db.transaction((tx) async {
       final row = (await tx.query('account_tasks', where: 'local_id=?', whereArgs: [id])).single;
       final changed = <String, Object?>{};
       for (final field in fields.entries) {
+        if (field.key == 'checklist') {
+          if (row['checklist_json'] != jsonEncode(checklist)) changed['checklist'] = checklist;
+          continue;
+        }
         final value = field.key == 'title' ? (field.value as String).trim() : field.value;
         if (row[field.key] != value) changed[field.key] = value;
       }
       if (changed.isEmpty) return;
-      await tx.update('account_tasks', changed, where: 'local_id=?', whereArgs: [id]);
+      if (utf8.encode(jsonEncode(changed)).length > 120 * 1024) {
+        throw ArgumentError('Правка слишком большая для API. Сократи текст или сохрани описание и чек-лист отдельно.');
+      }
+      final values = <String, Object?>{...changed};
+      if (values.containsKey('checklist')) values['checklist_json'] = jsonEncode(values.remove('checklist'));
+      await tx.update('account_tasks', values, where: 'local_id=?', whereArgs: [id]);
       await tx.insert('account_queue', {'operation_uuid': operationUuid(), 'local_id': id,
         'kind': 'edit', 'fields': jsonEncode(changed)});
     });

@@ -39,13 +39,21 @@ class SyncController
             'task_id' => 'required_if:kind,status,edit|prohibited_if:kind,create|integer|min:1',
             'expected_version' => 'required_if:kind,status,edit|prohibited_if:kind,create|integer|min:1',
             'status' => ['required_if:kind,status', 'prohibited_unless:kind,status', Rule::in(['todo', 'doing', 'done'])],
-            'fields' => 'required_if:kind,edit|prohibited_unless:kind,edit|array:title,description,due_date,priority,project_id|min:1',
+            'fields' => 'required_if:kind,edit|prohibited_unless:kind,edit|array:title,description,due_date,priority,project_id,checklist|min:1',
             'fields.title' => 'sometimes|required|string|max:240',
             'fields.description' => 'sometimes|nullable|string|max:20000',
             'fields.due_date' => 'sometimes|nullable|date_format:Y-m-d',
             'fields.priority' => ['sometimes', Rule::in(['normal', 'high'])],
             'fields.project_id' => 'sometimes|nullable|integer|min:1',
+            'fields.checklist' => 'sometimes|array|list|max:100',
+            'fields.checklist.*' => 'required|array:text,done',
+            'fields.checklist.*.text' => 'required|string|max:500',
+            'fields.checklist.*.done' => 'required|boolean',
         ]);
+        if (isset($d['fields']['checklist'])) {
+            foreach ($d['fields']['checklist'] as &$item) ksort($item);
+            unset($item);
+        }
         if (isset($d['fields'])) ksort($d['fields']);
         ksort($d);
         $hash = hash('sha256', 'sync-operation-v1:'.json_encode($d, JSON_THROW_ON_ERROR));

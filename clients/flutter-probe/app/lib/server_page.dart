@@ -10,6 +10,7 @@ import 'workspace_api.dart';
 import 'account_store.dart';
 import 'account_sync.dart';
 import 'task_editor.dart';
+import 'checklists.dart';
 
 class SecureTokenVault implements TokenVault {
   final storage = const FlutterSecureStorage();
@@ -96,6 +97,7 @@ class _ServerPageState extends State<ServerPage> {
       try { await vault.delete(); } catch (_) { /* Revoked token cannot authorize requests. */ }
     }
     message = error is ApiFailure ? error.message
+        : error is ArgumentError ? error.message.toString()
         : 'Не удалось выполнить действие. Проверь хранилище и повтори. Очередь не очищена.';
     await reload();
   }
@@ -176,10 +178,12 @@ class _ServerPageState extends State<ServerPage> {
       content: SizedBox(width: 640, child: SingleChildScrollView(child: Text(
           'НА УСТРОЙСТВЕ\n${local['title']} · ${local['status']}\n'
           'Проект: ${local['project_id'] ?? 'без проекта'} · срок: ${local['due_date'] ?? 'нет'}\n'
-          'Приоритет: ${local['priority']}\n${local['description'] ?? ''}\n\n'
+          'Приоритет: ${local['priority']}\n${local['description'] ?? ''}\n'
+          'Чек-лист:\n${Checklists.read(local['checklist_json']).map((i) => '${i['done'] == true ? '✓' : '○'} ${i['text']}').join('\n')}\n\n'
           'НА САЙТЕ\n${remote['title']} · ${remote['status']}\n'
           'Проект: ${remote['project_id'] ?? 'без проекта'} · срок: ${remote['due_date'] ?? 'нет'}\n'
-          'Приоритет: ${remote['priority']}\n${remote['description'] ?? ''}\n\n'
+          'Приоритет: ${remote['priority']}\n${remote['description'] ?? ''}\n'
+          'Чек-лист:\n${(remote['checklist'] as List? ?? []).map((i) => '${i['done'] == true ? '✓' : '○'} ${i['text']}').join('\n')}\n\n'
           'Принять все поля версии сайта и удалить ожидающие изменения этой задачи?'))),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Оставить конфликт')),
@@ -235,10 +239,23 @@ class _ServerPageState extends State<ServerPage> {
             Text('${row['done'] == true ? '✓' : '○'} ${row['text']}'),
           const SizedBox(height: 16),
           Text('Комментарии: ${task['comments_count']} · файлы: ${task['attachments_count']}'),
-          const Text('Описание и чек-лист пока доступны только для просмотра.'),
+          const Text('Это последняя серверная копия. Локальные правки доступны в редакторе.'),
         ],
       ))),
       actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Закрыть'))],
+    ));
+  }
+
+  Widget checklistProgress(Map<String, Object?> task) {
+    final rows = Checklists.read(task['checklist_json']);
+    if (rows.isEmpty) return const SizedBox.shrink();
+    final done = rows.where((item) => item['done'] == true).length;
+    return Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text('Чек-лист: $done/${rows.length}'),
+        const SizedBox(height: 4),
+        LinearProgressIndicator(value: done / rows.length),
+      ],
     ));
   }
 
@@ -292,6 +309,7 @@ class _ServerPageState extends State<ServerPage> {
                 Text(task['title'] as String, style: Theme.of(context).textTheme.titleMedium),
                 if (task['due_date'] != null) Text('Срок: ${task['due_date']}'),
                 if (task['priority'] == 'high') const Text('Высокий приоритет'),
+                checklistProgress(task),
                 Text(task['blocked'] == 1 ? 'Конфликт: ${task['error']}'
                     : (task['pending'] as int) > 0 ? 'Сохранено на устройстве · ожидает отправки' : 'Сохранено на сайте'),
                 Wrap(spacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [

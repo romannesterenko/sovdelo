@@ -702,4 +702,26 @@ class WorkspaceTest extends TestCase {
   $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertConflict();
   $this->assertSame('Задача',$t->fresh()->title);
  }
+ public function test_sync_checklist_edit_replays_and_clears_without_resetting_status():void {
+  $u=$this->account();$token=$this->deviceToken($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Пункты','status'=>'doing','description'=>'Не менять']);
+  $key=(string)\Illuminate\Support\Str::uuid();$items=[['text'=>'Первый','done'=>true],['text'=>'Второй','done'=>false]];
+  $body=['operation_uuid'=>$key,'kind'=>'edit','task_id'=>$t->id,'expected_version'=>$t->version,'fields'=>['checklist'=>$items]];
+  $result=$this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertOk()->assertJsonPath('data.task.checklist.0.done',true)->assertJsonPath('data.task.checklist.1.text','Второй')->assertJsonPath('data.task.status','doing')->json('data');
+  $body['fields']['checklist']=array_map(fn($i)=>array_reverse($i,true),$items);
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertOk()->assertExactJson(['data'=>$result,'meta'=>['api_version'=>'1']]);
+  $body['operation_uuid']=(string)\Illuminate\Support\Str::uuid();$body['expected_version']=$result['task']['version'];$body['fields']=['checklist'=>[]];
+  $this->apiCall('POST','/api/v1/sync/operations',$token,$body)->assertOk()->assertJsonPath('data.task.checklist',[])->assertJsonPath('data.task.description','Не менять');
+ }
+ public function test_sync_checklist_rejects_invalid_items_without_partial_write():void {
+  $u=$this->account();$token=$this->deviceToken($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Не менять','checklist'=>[['text'=>'Исходный','done'=>false]]]);
+  $invalid=[null,[['text'=>'','done'=>true]],[['text'=>'Нет отметки']],[['text'=>'Лишнее','done'=>true,'owner'=>1]],array_fill(0,101,['text'=>'Пункт','done'=>false]),[['text'=>str_repeat('я',501),'done'=>false]],['named'=>['text'=>'Не список','done'=>false]]];
+  foreach($invalid as $list){$this->apiCall('POST','/api/v1/sync/operations',$token,['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'edit','task_id'=>$t->id,'expected_version'=>$t->version,'fields'=>['title'=>'Попытка','checklist'=>$list]])->assertUnprocessable();}
+  $this->assertSame('Не менять',$t->fresh()->title);$this->assertSame([['text'=>'Исходный','done'=>false]],$t->fresh()->checklist);$this->assertDatabaseCount('api_requests',0);
+ }
+ public function test_sync_checklist_stale_version_preserves_server_items():void {
+  $u=$this->account();$token=$this->deviceToken($u);$t=Task::create(['user_id'=>$u->id,'title'=>'Конфликт']);$old=$t->version;
+  app(\App\Services\TaskOrder::class)->update($u->id,$t->id,['checklist'=>[['text'=>'С сайта','done'=>true]]]);
+  $this->apiCall('POST','/api/v1/sync/operations',$token,['operation_uuid'=>(string)\Illuminate\Support\Str::uuid(),'kind'=>'edit','task_id'=>$t->id,'expected_version'=>$old,'fields'=>['checklist'=>[['text'=>'С телефона','done'=>false]]]])->assertConflict();
+  $this->assertSame([['text'=>'С сайта','done'=>true]],$t->fresh()->checklist);$this->assertDatabaseCount('api_requests',0);
+ }
 }
