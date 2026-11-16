@@ -92,3 +92,13 @@ Route::middleware(['auth',\App\Http\Middleware\EnsureAccountSession::class])->gr
  });
  Route::delete('/tasks/{task}',function(Request $r,Task $task){abort_unless($task->user_id===$r->user()->id,404);app(TaskOrder::class)->delete($r->user()->id,$task->id);return response()->noContent();});
 });
+
+Route::prefix('project-control')->middleware(['auth',\App\Http\Middleware\EnsureAccountSession::class])->group(function(){
+ $c=\App\Http\Controllers\AgentWorkspaceController::class;
+ Route::get('/',[$c,'ownerIndex']);Route::get('/projects/{project}',[$c,'ownerProject'])->whereNumber('project');
+ Route::post('/agents',[$c,'ownerIssue'])->middleware('throttle:6,1');
+ Route::post('/agents/{agent}/revoke',[$c,'ownerRevoke'])->whereNumber('agent')->middleware('throttle:6,1');
+ Route::post('/projects/{project}/tasks/{task}',[$c,'ownerAction'])->whereNumber('project')->whereNumber('task');
+ Route::post('/plan/preview',[\App\Http\Controllers\DevelopmentPlanController::class,'preview']);
+ Route::post('/plan/import',[\App\Http\Controllers\DevelopmentPlanController::class,'import'])->middleware('throttle:6,1');
+});

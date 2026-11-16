@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {ref,computed,onUnmounted,nextTick,watch} from 'vue';
 import Icon from './Icon.vue';
+import ProjectControl from './ProjectControl.vue';
 type Account={name:string;email:string;timezone?:string;theme?:string};
 type Device={id:string;current:boolean;ip:string|null;agent:string;last_activity:number};
 const props=defineProps<{user:Account;csrf:string;disabled:boolean}>();
@@ -42,6 +43,7 @@ function key(e:KeyboardEvent){if(e.key==='Escape'){e.stopPropagation();close()}i
  <form v-if="target" class="extras-confirm" @submit.prevent="revoke"><p>Завершить выбранную сессию?</p><label>Текущий пароль<input v-model="devicePassword" type="password" required maxlength="128" autocomplete="current-password"></label><p class="muted">Другие активные сессии сохранятся. Когда они истекут, для входа может снова потребоваться пароль.</p><div class="actions"><button class="primary">Завершить</button><button type="button" @click="target=null;devicePassword=''">Отмена</button></div></form>
  </details>
  <details><summary>Подключённые приложения · {{apiDevices.filter(d=>d.valid).length}}</summary><p class="muted">API-доступ твоих устройств. Здесь можно отозвать выданный токен. После смены пароля старые токены недействительны.</p><button type="button" @click="run(loadDevices)">Обновить</button><p v-if="!apiDevices.length" class="muted">Подключённых приложений пока нет.</p><article v-for="d in apiDevices" :key="d.id" class="device-row"><strong>{{d.name}}</strong><p>{{d.access==='write'?'Чтение и запись':'Только чтение'}} · {{d.valid?'Действует':'Недействителен'}}</p><small>Использование: {{d.last_used_at?new Date(d.last_used_at).toLocaleString('ru-RU'):'ещё не использовался'}}<br>Срок: {{d.expires_at?new Date(d.expires_at).toLocaleString('ru-RU'):'не указан'}}</small><button type="button" @click="apiTarget=d;apiPassword=''">Отозвать</button></article><form v-if="apiTarget" class="extras-confirm" @submit.prevent="revokeApi"><p>Отозвать доступ «{{apiTarget.name}}»?</p><label>Текущий пароль<input v-model="apiPassword" type="password" required maxlength="128" autocomplete="current-password"></label><div class="actions"><button class="primary">Отозвать доступ</button><button type="button" @click="apiTarget=null;apiPassword=''">Отмена</button></div></form></details>
+ <ProjectControl :csrf="token" @working="v=>{busy=v;emit('working',v)}"/>
  </fieldset><p v-if="busy" role="status">Сохраняем…</p>
  </section></div>
 </template>

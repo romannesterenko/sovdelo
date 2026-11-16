@@ -37,3 +37,23 @@ Route::prefix('v1')->withoutMiddleware(EnsureFrontendRequestsAreStateful::class)
   Route::get('/tasks/{task}/time',[WorkspaceController::class,'time'])->whereNumber('task');
  });
 });
+
+Route::prefix('v1/agent')->withoutMiddleware(EnsureFrontendRequestsAreStateful::class)
+ ->middleware(['auth:sanctum',\App\Http\Middleware\AgentAccess::class,'throttle:workspace-api'])->group(function(){
+ $c=\App\Http\Controllers\AgentWorkspaceController::class;
+ Route::get('/context',[$c,'context']);Route::get('/tasks',[$c,'tasks']);
+ Route::get('/tasks/{task}',[$c,'show'])->whereNumber('task');Route::post('/tasks',[$c,'create']);
+ Route::post('/tasks/{task}/actions',[$c,'action'])->whereNumber('task');Route::get('/activity',[$c,'activity']);
+});
+
+Route::prefix('v1/agent')->withoutMiddleware(EnsureFrontendRequestsAreStateful::class)
+ ->middleware(['auth:sanctum',\App\Http\Middleware\AgentAccess::class,'throttle:workspace-api'])->group(function(){
+ $controller=\App\Http\Controllers\AgentWorkspaceController::class;
+ Route::post('/mcp',[\App\Http\Controllers\AgentMcpController::class,'handle']);
+ Route::get('/context',[$controller,'context']);
+ Route::get('/tasks',[$controller,'tasks']);
+ Route::post('/tasks',[$controller,'create']);
+ Route::get('/tasks/{task}',[$controller,'show'])->whereNumber('task');
+ Route::post('/tasks/{task}/actions',[$controller,'action'])->whereNumber('task');
+ Route::get('/activity',[$controller,'activity']);
+});
