@@ -14,7 +14,7 @@ class NativeFileTransfers implements AttachmentTransport {
   Future<void> status(HttpClientResponse response) async {
     final code=response.statusCode;
     if(code==401)throw const ApiFailure(401,'Сессия истекла. Войди снова');
-    if(code==429)throw const ApiFailure(429,'Слишком много запросов. Повтори позже');
+    if(code==429)throw ApiFailure(429,'Слишком много запросов. Повтори позже',retryAfter:int.tryParse(response.headers.value('retry-after')??''));
     if(code<200||code>=300)throw ApiFailure(code,code==422?'Файл не принят: проверь тип, размер и лимит вложений':'Ошибка передачи файла: $code');
   }
   @override

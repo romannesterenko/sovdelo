@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'account_store.dart';
 import 'comments_sync.dart';
@@ -9,10 +10,13 @@ class CommentsDialog extends StatefulWidget {
   final String token, localId, taskTitle, author;
   final bool canWrite;
   final bool fullScreen;
+  final Listenable? changes;
+  final String Function()? syncMessage;
+  final VoidCallback? scheduleRefresh;
   final Future<void> Function() synchronize;
   const CommentsDialog({super.key, required this.store, required this.api,
     required this.token, required this.localId, required this.taskTitle, required this.author,
-    required this.canWrite, required this.synchronize, this.fullScreen=false});
+    required this.canWrite, required this.synchronize, this.fullScreen=false,this.changes,this.syncMessage,this.scheduleRefresh});
   @override
   State<CommentsDialog> createState() => _CommentsDialogState();
 }
@@ -23,12 +27,12 @@ class _CommentsDialogState extends State<CommentsDialog> {
   bool busy = true;
   String message = 'Открываем сохранённую историю…';
   @override
-  void initState() { super.initState(); initialize(); }
+  void initState() { super.initState();widget.changes?.addListener(cacheChanged); initialize(); }
 
   Future<void> initialize() => run(() async {
     rows = await widget.store.comments(widget.localId);
     if (mounted) setState(() {});
-    await refresh();
+    if(widget.scheduleRefresh!=null){widget.scheduleRefresh!();message='Сохранённая история. Обновление выполняется в фоне.';}else{await refresh();}
   });
 
   Future<void> refresh() async {
@@ -60,7 +64,7 @@ class _CommentsDialogState extends State<CommentsDialog> {
     body.clear();
     message = 'Комментарий сохранён на устройстве и ожидает отправки.';
     await widget.synchronize();
-    await refresh();
+    if(widget.scheduleRefresh!=null)widget.scheduleRefresh!();else await refresh();
   });
 
   Future<void> discard(Map<String, Object?> comment) => run(() async {
@@ -73,6 +77,16 @@ class _CommentsDialogState extends State<CommentsDialog> {
     if (yes == true) await widget.store.discardComment(comment['local_id'] as String);
   });
 
+  int cacheVersion=0;
+  void cacheChanged(){unawaited(readCache());}
+  Future<void> readCache() async {
+    final version=++cacheVersion;
+    try{
+      final loaded=await widget.store.comments(widget.localId);
+      if(mounted&&version==cacheVersion)setState((){rows=loaded;if(!busy&&widget.syncMessage!=null)message=widget.syncMessage!();});
+    }catch(_){/* Retain the last displayed cache if closing or a storage read fails. */}
+  }
+
   String date(Object? value) {
     final time = DateTime.tryParse(value?.toString() ?? '')?.toLocal();
     if (time == null) return '';
@@ -81,7 +95,7 @@ class _CommentsDialogState extends State<CommentsDialog> {
   }
 
   @override
-  void dispose() { body.dispose(); super.dispose(); }
+  void dispose() { widget.changes?.removeListener(cacheChanged);body.dispose(); super.dispose(); }
   @override
   Widget build(BuildContext context) {
     final dialog=AlertDialog(
@@ -91,7 +105,7 @@ class _CommentsDialogState extends State<CommentsDialog> {
         if (busy) const LinearProgressIndicator(),
         Text(message),
         Align(alignment: Alignment.centerLeft, child: TextButton.icon(
-          onPressed: busy ? null : () => run(() async { await widget.synchronize(); await refresh(); }),
+          onPressed: busy ? null : () => run(() async { await widget.synchronize(); if(widget.scheduleRefresh!=null)widget.scheduleRefresh!();else await refresh(); }),
           icon: const Icon(Icons.refresh), label: const Text('Обновить и отправить очередь'))),
         if (rows.isEmpty) const Padding(padding: EdgeInsets.all(16), child: Text('В сохранённой истории пока нет комментариев.')),
         for (final row in rows) Card(child: Padding(padding: const EdgeInsets.all(12), child: Column(
@@ -104,7 +118,7 @@ class _CommentsDialogState extends State<CommentsDialog> {
             if (row['state'] == 'blocked') Wrap(spacing: 8, children: [
               TextButton(onPressed: busy || !widget.canWrite ? null : () => run(() async {
                 await widget.store.retryComment(row['local_id'] as String);
-                await widget.synchronize(); await refresh();
+                await widget.synchronize(); if(widget.scheduleRefresh!=null)widget.scheduleRefresh!();else await refresh();
               }), child: const Text('Повторить')),
               TextButton(onPressed: busy ? null : () => discard(row), child: const Text('Убрать с устройства')),
             ]),

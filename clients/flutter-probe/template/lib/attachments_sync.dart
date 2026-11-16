@@ -5,9 +5,10 @@ import 'file_transfers.dart';
 import 'workspace_api.dart';
 
 class AttachmentsSync {
-  static Future<void> refresh(WorkspaceApi api,AccountStore store,String token,String id) async {
+  static Future<void> refresh(WorkspaceApi api,AccountStore store,String token,String id,{void Function()? check}) async {
     final task=await store.task(id);if(task['server_id']==null)return;
-    await store.mergeAttachments(id,await api.attachments(token,task['server_id'] as int));
+    check?.call();final list=await api.attachments(token,task['server_id'] as int);
+    check?.call();await store.mergeAttachments(id,list);
   }
   static Future<String> cached(AccountStore store,AttachmentTransport transport,String token,Map<String,Object?> file) async {
     final files=AttachmentFiles(store);

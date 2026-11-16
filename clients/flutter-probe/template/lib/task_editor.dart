@@ -1,19 +1,22 @@
 import 'package:flutter/material.dart';
 import 'checklists.dart';
 import 'task_labels.dart';
+import 'task_draft.dart';
 
 class TaskEditor extends StatefulWidget {
   final Map<String, Object?> task;
   final List<Map<String, Object?>> projects;
   final List<Map<String, Object?>> labels;
   final bool fullScreen;
-  const TaskEditor({super.key, required this.task, required this.projects, this.labels = const [], this.fullScreen=false});
+  final Future<void> Function(Map<String,Object?>)? onSave;
+  const TaskEditor({super.key, required this.task, required this.projects, this.labels = const [], this.fullScreen=false,this.onSave});
   @override
   State<TaskEditor> createState() => _TaskEditorState();
 }
 
 class _TaskEditorState extends State<TaskEditor> {
   final form = GlobalKey<FormState>();
+  bool saving=false;String saveError='';
   late final title = TextEditingController(text: widget.task['title'] as String);
   late final description = TextEditingController(text: widget.task['description'] as String? ?? '');
   late final due = TextEditingController(text: widget.task['due_date'] as String? ?? '');
@@ -38,9 +41,10 @@ class _TaskEditorState extends State<TaskEditor> {
     if (result != null && mounted) due.text = result.toIso8601String().substring(0, 10);
   }
 
-  void save() {
+  Future<void> save() async {
+    if(saving)return;
     if (!(form.currentState?.validate() ?? false)) return;
-    Navigator.pop(context, <String, Object?>{
+    final fields=TaskDraft.changed(widget.task,<String,Object?>{
       'title': title.text.trim(),
       'description': description.text.isEmpty ? null : description.text,
       'due_date': due.text.isEmpty ? null : due.text,
@@ -48,6 +52,13 @@ class _TaskEditorState extends State<TaskEditor> {
       'label_keys': TaskLabels.keys(selectedLabels.toList()),
       'checklist': Checklists.normalize([for (final item in checklist) {'text': item.text.text, 'done': item.done}]),
     });
+    setState((){saving=true;saveError='';});
+    try{
+      if(fields.isNotEmpty)await widget.onSave?.call(fields);
+      if(mounted)Navigator.pop(context,fields);
+    }catch(error){
+      if(mounted)setState(()=>saveError=error is DraftConflict?error.message:error is ArgumentError?error.message.toString():'Не удалось сохранить. Твой текст остаётся в редакторе.');
+    }finally{if(mounted)setState(()=>saving=false);}
   }
 
   @override
@@ -65,6 +76,7 @@ class _TaskEditorState extends State<TaskEditor> {
       title: const Text('Редактирование задачи'),
       content: SizedBox(width: 640, child: SingleChildScrollView(child: Form(key: form, child: Column(
         mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          if(saveError.isNotEmpty)Padding(padding:const EdgeInsets.only(bottom:12),child:Text(saveError,style:const TextStyle(color:Color(0xffeb8d8d)))),
           TextFormField(controller: title, maxLength: 240, decoration: const InputDecoration(labelText: 'Название'),
             validator: (value) => value == null || value.trim().isEmpty ? 'Введи название' : null),
           const SizedBox(height: 12),
@@ -123,13 +135,13 @@ class _TaskEditorState extends State<TaskEditor> {
           const Text('Правки сохранятся на устройстве. При наличии сети приложение попробует отправить их на сайт.'),
         ],
       )))),
-      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Отмена')),
-        FilledButton(onPressed: save, child: const Text('Сохранить'))],
+      actions: [TextButton(onPressed: saving?null:() => Navigator.pop(context), child: const Text('Отмена')),
+        FilledButton(onPressed: saving?null:save, child: const Text('Сохранить'))],
     );
-    if(!widget.fullScreen)return dialog;
-    return Scaffold(appBar:AppBar(title:const Text('Редактирование'),actions:[
-      TextButton(onPressed:save,child:const Text('Сохранить')),
-    ]),body:Padding(padding:const EdgeInsets.all(16),child:dialog.content!));
+    if(!widget.fullScreen)return PopScope(canPop:!saving,child:dialog);
+    return PopScope(canPop:!saving,child:Scaffold(appBar:AppBar(title:const Text('Редактирование'),actions:[
+      TextButton(onPressed:saving?null:save,child:const Text('Сохранить')),
+    ]),body:Padding(padding:const EdgeInsets.all(16),child:dialog.content!)));
   }
 }
 

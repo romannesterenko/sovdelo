@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'account_store.dart';
 import 'task_labels.dart';
@@ -6,8 +7,11 @@ import 'workspace_api.dart';
 class LabelsDialog extends StatefulWidget {
   final AccountStore store;
   final bool canWrite;
+  final Listenable? changes;
+  final String Function()? syncMessage;
+
   final Future<void> Function() synchronize;
-  const LabelsDialog({super.key, required this.store, required this.canWrite, required this.synchronize});
+  const LabelsDialog({super.key, required this.store, required this.canWrite, required this.synchronize,this.changes,this.syncMessage});
   @override
   State<LabelsDialog> createState() => _LabelsDialogState();
 }
@@ -19,7 +23,7 @@ class _LabelsDialogState extends State<LabelsDialog> {
   bool busy = true;
   List<Map<String, Object?>> rows = [];
   @override
-  void initState() { super.initState(); run(() async {}); }
+  void initState() { super.initState();widget.changes?.addListener(cacheChanged); run(() async {}); }
   Future<void> run(Future<void> Function() operation) async {
     setState(() => busy = true);
     try { await operation(); }
@@ -32,8 +36,18 @@ class _LabelsDialogState extends State<LabelsDialog> {
       if (mounted) setState(() => busy = false);
     }
   }
+  int cacheVersion=0;
+  void cacheChanged(){unawaited(readCache());}
+  Future<void> readCache() async {
+    final version=++cacheVersion;
+    try{
+      final loaded=await widget.store.labels();
+      if(mounted&&version==cacheVersion)setState((){rows=loaded;if(!busy&&widget.syncMessage!=null)message=widget.syncMessage!();});
+    }catch(_){/* Retain the last displayed cache if closing or a storage read fails. */}
+  }
+
   @override
-  void dispose() { name.dispose(); super.dispose(); }
+  void dispose() { widget.changes?.removeListener(cacheChanged);name.dispose(); super.dispose(); }
   @override
   Widget build(BuildContext context) => PopScope(canPop: !busy, child: AlertDialog(
     title: const Text('Метки'),
@@ -41,7 +55,7 @@ class _LabelsDialogState extends State<LabelsDialog> {
       crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
         if (busy) const LinearProgressIndicator(),
         Text(message),
-        TextButton(onPressed: busy ? null : () => run(() async { await widget.synchronize(); message = 'Каталог обновлён.'; }),
+        TextButton(onPressed: busy ? null : () => run(() async { await widget.synchronize(); message = 'Обновление каталога запрошено.'; }),
           child: const Text('Обновить и отправить очередь')),
         for (final label in rows) ListTile(
           leading: Icon(Icons.label, color: Color(TaskLabels.colors[label['color']] ?? 0xff929a9e)),
@@ -62,7 +76,7 @@ class _LabelsDialogState extends State<LabelsDialog> {
         FilledButton(onPressed: busy || !widget.canWrite ? null : () => run(() async {
           await widget.store.addLabel(name.text, color); name.clear();
           message = 'Метка сохранена на устройстве.'; await widget.synchronize();
-          message = 'Каталог обновлён. Метку можно выбрать в редакторе задачи.';
+          message = 'Метка сохранена. Отправка выполняется в фоне.';
         }), child: const Text('Создать метку')),
         const Text('Без сети новая метка сохранится в очереди. Если такое имя уже есть на сайте, используем существующую метку и её цвет.'),
       ],

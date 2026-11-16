@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'checklists.dart';
 import 'task_labels.dart';
+import 'task_draft.dart';
 import 'package:sqflite_common/sqlite_api.dart';
 
 String operationUuid() {
@@ -195,20 +196,26 @@ class AccountStore {
       where: 'local_id=?', whereArgs: [op['local_id']]);
   }
   Future<void> blockAttachment(String key, String message) async {
-    await db.update('account_attachments', {'state': 'blocked', 'error': message}, where: 'local_id=?', whereArgs: [key]);
+    await db.update('account_attachments', {'state': 'blocked', 'error': message}, where: "local_id=? AND state='pending'", whereArgs: [key]);
   }
   Future<void> retryAttachment(String key) async {
     await db.update('account_attachments', {'state': 'pending', 'error': null}, where: "local_id=? AND state='blocked'", whereArgs: [key]);
   }
-  Future<void> discardAttachment(String key) async {
-    await db.delete('account_attachments', where: "local_id=? AND state='blocked'", whereArgs: [key]);
-  }
+  Future<String?> discardAttachment(String key) => db.transaction((tx) async {
+    final rows=await tx.query('account_attachments',where:"local_id=? AND state='blocked'",whereArgs:[key]);
+    if(rows.isEmpty)return null;
+    await tx.delete('account_attachments',where:'local_id=?',whereArgs:[key]);
+    return rows.single['local_path'] as String?;
+  });
   Future<void> cacheAttachment(String key, String path, String sha) async {
     await db.update('account_attachments', {'local_path': path, 'sha256': sha}, where: 'local_id=?', whereArgs: [key]);
   }
-  Future<void> uncacheAttachment(String key) async {
-    await db.update('account_attachments', {'local_path': null}, where: "local_id=? AND state='sent'", whereArgs: [key]);
-  }
+  Future<String?> uncacheAttachment(String key) => db.transaction((tx) async {
+    final rows=await tx.query('account_attachments',where:"local_id=? AND state='sent'",whereArgs:[key]);
+    if(rows.isEmpty)return null;
+    await tx.update('account_attachments',{'local_path':null},where:'local_id=?',whereArgs:[key]);
+    return rows.single['local_path'] as String?;
+  });
   Future<void> mergeAttachments(String id, List<Map<String, dynamic>> snapshot) => db.transaction((tx) async {
     final seen = <int>{};
     for (final file in snapshot) {
@@ -275,7 +282,7 @@ class AccountStore {
   }
 
   Future<void> blockComment(String id, String error) async {
-    await db.update('account_comments', {'state': 'blocked', 'error': error}, where: 'local_id=?', whereArgs: [id]);
+    await db.update('account_comments', {'state': 'blocked', 'error': error}, where: "local_id=? AND state='pending'", whereArgs: [id]);
   }
   Future<void> retryComment(String id) async {
     await db.update('account_comments', {'state': 'pending', 'error': null}, where: "local_id=? AND state='blocked'", whereArgs: [id]);
@@ -309,7 +316,7 @@ class AccountStore {
 
   Future<List<Map<String, Object?>>> projects() => db.query('account_projects', orderBy: 'name, id');
 
-  Future<void> edit(String id, Map<String, Object?> fields) async {
+  Future<void> edit(String id, Map<String, Object?> fields, {Map<String,Object?>? baseline}) async {
     const allowed = {'title', 'description', 'due_date', 'priority', 'project_id', 'checklist', 'label_keys'};
     if (fields.keys.any((key) => !allowed.contains(key))) throw ArgumentError('Неизвестное поле');
     if (fields.containsKey('title') &&
@@ -345,6 +352,7 @@ class AccountStore {
         if (row[field.key] != value) changed[field.key] = value;
       }
       if (changed.isEmpty) return;
+      if(baseline!=null&&changed.keys.any((key)=>TaskDraft.rowValue(row,key)!=TaskDraft.rowValue(baseline,key)))throw const DraftConflict();
       if (utf8.encode(jsonEncode(changed)).length > 120 * 1024) {
         throw ArgumentError('Правка слишком большая для API. Сократи текст или сохрани описание и чек-лист отдельно.');
       }
@@ -384,11 +392,12 @@ class AccountStore {
     });
   }
 
-  Future<void> setStatus(String id, String status) async {
+  Future<void> setStatus(String id, String status, {Map<String,Object?>? baseline}) async {
     if (!['todo', 'doing', 'done'].contains(status)) throw ArgumentError('Неизвестный статус');
     await db.transaction((tx) async {
       final row = (await tx.query('account_tasks', where: 'local_id=?', whereArgs: [id])).single;
       if (row['status'] == status) return;
+      if(baseline!=null&&row['status']!=baseline['status'])throw const DraftConflict('Статус уже изменился. Показана актуальная версия, повтори действие при необходимости.');
       await tx.update('account_tasks', {'status': status}, where: 'local_id=?', whereArgs: [id]);
       await tx.insert('account_queue', {'operation_uuid': operationUuid(), 'local_id': id, 'kind': 'status', 'status': status});
     });

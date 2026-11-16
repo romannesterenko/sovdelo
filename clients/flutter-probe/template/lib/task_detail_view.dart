@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'checklists.dart';
@@ -10,10 +11,12 @@ class TaskDetailView extends StatefulWidget {
   final List<Map<String,Object?>> projects,labels;
   final bool fullScreen,canWrite;
   final TaskAction action;
+  final Listenable? changes;
+  final Future<Map<String,Object?>?> Function()? readTask;
   final String Function() message;
   final Future<List<Map<String,Object?>>> Function()? readProjects,readLabels;
   const TaskDetailView({super.key,required this.initial,required this.projects,required this.labels,
-    required this.fullScreen,required this.canWrite,required this.action,required this.message,this.readProjects,this.readLabels});
+    required this.fullScreen,required this.canWrite,required this.action,required this.message,this.readProjects,this.readLabels,this.changes,this.readTask});
   @override
   State<TaskDetailView> createState()=>_TaskDetailViewState();
 }
@@ -21,10 +24,25 @@ class _TaskDetailViewState extends State<TaskDetailView> {
   late Map<String,Object?> task={...widget.initial};
   bool busy=false;String note='';
   late List<Map<String,Object?>> projectRows=[...widget.projects],labelRows=[...widget.labels];
-  Future<void> perform(String action,[Object? value]) async {
+  int cacheVersion=0;
+  @override
+  void initState(){super.initState();widget.changes?.addListener(cacheChanged);}
+  @override
+  void dispose(){widget.changes?.removeListener(cacheChanged);super.dispose();}
+  void cacheChanged(){if(!busy)unawaited(readCache());}
+  Future<void> readCache() async {
+    final version=++cacheVersion;
+    try{
+      final updated=await widget.readTask?.call();
+      final projects=await widget.readProjects?.call()??projectRows;
+      final labels=await widget.readLabels?.call()??labelRows;
+      if(mounted&&!busy&&version==cacheVersion&&updated!=null)setState((){task=updated;projectRows=projects;labelRows=labels;note=widget.message();});
+    }catch(_){/* Keep the displayed cache if the account is closing. */}
+  }
+  Future<void> perform(String action,[Object? value,Map<String,Object?>? baseline]) async {
     setState(()=>busy=true);
     try {
-      final updated=await widget.action(action,task,value);
+      final updated=await widget.action(action,baseline??task,value);
       if(!mounted)return;
       if(updated==null){Navigator.pop(context);return;}
       final projects=await widget.readProjects?.call()??projectRows;
@@ -57,7 +75,7 @@ class _TaskDetailViewState extends State<TaskDetailView> {
             ]))),
             Row(children:[Expanded(child:DropdownButton<String>(value:task['status'] as String,isExpanded:true,
               items:[for(final entry in TaskPresentation.statuses.entries)DropdownMenuItem(value:entry.key,child:Text(entry.value))],
-              onChanged:locked?null:(value){if(value!=null){setState(()=>task={...task,'status':value});perform('status',value);}})),
+              onChanged:locked?null:(value){if(value!=null){final baseline={...task};setState(()=>task={...task,'status':value});perform('status',value,baseline);}})),
               if(task['priority']=='high')const Padding(padding:EdgeInsets.only(left:16),child:Icon(Icons.flag,color:Color(0xffe3a057))),
             ]),
             const SizedBox(height:12),
@@ -86,7 +104,7 @@ class _TaskDetailViewState extends State<TaskDetailView> {
               value:checklist[index]['done'] as bool,title:Text(checklist[index]['text'] as String),controlAffinity:ListTileControlAffinity.leading,
               onChanged:locked?null:(done){
                 final updated=checklist.map((item)=>Map<String,dynamic>.from(item)).toList();updated[index]['done']=done??false;
-                setState(()=>task={...task,'checklist_json':jsonEncode(updated)});perform('checklist',updated);
+                final baseline={...task};setState(()=>task={...task,'checklist_json':jsonEncode(updated)});perform('checklist',updated,baseline);
               },
             ),
             TextButton.icon(onPressed:locked?null:()=>perform('edit'),icon:const Icon(Icons.edit_outlined),label:const Text('Изменить пункты')),

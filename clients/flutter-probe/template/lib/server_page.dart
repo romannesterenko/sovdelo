@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -8,7 +9,8 @@ import 'package:sqflite/sqflite.dart' as native;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart' as ffi;
 import 'workspace_api.dart';
 import 'account_store.dart';
-import 'account_sync.dart';
+import 'workspace_worker.dart';
+import 'task_draft.dart';
 import 'task_editor.dart';
 import 'checklists.dart';
 import 'comments_dialog.dart';
@@ -51,7 +53,7 @@ class ServerPage extends StatefulWidget {
   State<ServerPage> createState() => _ServerPageState();
 }
 
-class _ServerPageState extends State<ServerPage> {
+class _ServerPageState extends State<ServerPage> with WidgetsBindingObserver {
   final email = TextEditingController(), password = TextEditingController(), title = TextEditingController();
   final api = WorkspaceApi();
   final vault = SecureTokenVault();
@@ -59,6 +61,9 @@ class _ServerPageState extends State<ServerPage> {
   String? token;
   Map<String, dynamic>? profile;
   AccountStore? store;
+  WorkspaceWorker? worker;
+  int _uiDepth=0;
+  bool _expiring=false;
   List<Map<String, Object?>> items = [];
   String message = 'Открываем аккаунт…';
   bool busy = true;
@@ -69,29 +74,57 @@ class _ServerPageState extends State<ServerPage> {
   bool queuedOnly=false;
   List<Map<String,Object?>> projectCatalog=[];
   final search=TextEditingController();
-  bool get canWrite => profile?['access'] == 'write';
+  bool get canWrite => profile?['access'] == 'write'&&worker?.requiresLogin!=true&&worker?.closing!=true;
 
   @override
-  void initState() { super.initState(); restore(); }
+  void initState() { super.initState();WidgetsBinding.instance.addObserver(this);restore(); }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state){
+    if(state==AppLifecycleState.resumed)worker?.setForeground(true);
+    if(state==AppLifecycleState.paused||state==AppLifecycleState.hidden||state==AppLifecycleState.detached)worker?.setForeground(false);
+  }
 
   Future<void> openStore() async {
-    if (store != null) return;
+    if (worker != null) return;
     final id = profile!['id'] as int;
     if (id <= 0) throw StateError('Некорректный аккаунт');
     final directory = await getApplicationSupportDirectory();
     if (Platform.isLinux || Platform.isWindows) ffi.sqfliteFfiInit();
-    store = await AccountStore.open(Platform.isAndroid ? native.databaseFactory : ffi.databaseFactoryFfi,
+    store ??= await AccountStore.open(Platform.isAndroid ? native.databaseFactory : ffi.databaseFactoryFfi,
         p.join(directory.path, 'production-account-$id-v1.sqlite3'));
     await AttachmentFiles(store!).cleanOrphans();
+    final accountToken=token!;
+    worker=WorkspaceWorker(store:store!,api:api,token:accountToken,profile:profile!,
+      saveProfile:(value)=>vault.remember(accountToken,value));
+    final lifecycle=WidgetsBinding.instance.lifecycleState;
+    worker!.foreground=lifecycle!=AppLifecycleState.paused&&lifecycle!=AppLifecycleState.hidden&&lifecycle!=AppLifecycleState.detached;
+    worker!.addListener(workerChanged);
     await reload();
   }
 
+  void workerChanged(){
+    final current=worker;if(!mounted||current==null)return;
+    items=current.tasks;projectCatalog=current.projects;labelCatalog=current.labels;pending=current.pending;
+    profile=current.profile;message=current.message;
+    setState((){});
+    if(current.requiresLogin&&_uiDepth==0&&!busy&&!_expiring)unawaited(expireAccount());
+  }
   Future<void> reload() async {
-    if (store == null) return;
-    items = await store!.tasks();
-    pending = await store!.pendingCount();
-    labelCatalog = await store!.labels();
-    projectCatalog = await store!.projects();
+    if(worker==null)return;
+    await worker!.refreshLocal();
+  }
+  Future<void> expireAccount() async {
+    if(_expiring||worker?.requiresLogin!=true)return;
+    _expiring=true;if(mounted)setState(()=>busy=true);
+    final current=worker;current?.removeListener(workerChanged);
+    try{
+      try{await current?.close();}catch(_){}
+      if(worker!=current)return;
+      try{await vault.delete();}catch(_){}worker=null;store=null;token=null;profile=null;
+      items=[];projectCatalog=[];labelCatalog=[];pending=0;navigation=0;projectFilter=-1;statusFilter=labelFilter=searchQuery='';queuedOnly=false;search.clear();
+      message='Сессия истекла. Войди снова — локальная очередь сохранена.';
+    }finally{_expiring=false;if(mounted)setState(()=>busy=false);}
   }
 
   Future<void> restore() async {
@@ -103,43 +136,36 @@ class _ServerPageState extends State<ServerPage> {
       await synchronize();
     } catch (e) { await handleError(e); }
     finally {
-      if (mounted) { setState(() => busy = false); }
-      else { await store?.db.close(); }
+      if (mounted) { setState(() => busy = false);if(worker?.requiresLogin==true&&_uiDepth==0)unawaited(expireAccount()); }
+      else { worker?.dispose(); }
     }
   }
 
   Future<void> handleError(Object error) async {
-    if (error is ApiFailure && error.status == 401) {
-      await store?.db.close(); store = null;
-      token = null; profile = null; items = []; pending = 0; labelCatalog = []; projectCatalog=[]; navigation=0; projectFilter=-1; statusFilter=labelFilter=searchQuery=''; queuedOnly=false;search.clear();
-      try { await vault.delete(); } catch (_) { /* Revoked token cannot authorize requests. */ }
+    if(error is ApiFailure&&error.status==401){
+      if(worker!=null){worker!.requireLogin();return;}
+      token=null;profile=null;try{await vault.delete();}catch(_){}
     }
-    message = error is ApiFailure ? error.message
-        : error is ArgumentError ? error.message.toString()
-        : 'Не удалось выполнить действие. Проверь хранилище и повтори. Очередь не очищена.';
-    await reload();
+    final errorMessage=error is ApiFailure?error.message:error is DraftConflict?error.message:
+      error is ArgumentError?error.message.toString():'Не удалось выполнить действие. Очередь сохранена.';
+    await reload();message=errorMessage;
   }
 
   Future<void> perform(Future<void> Function() operation) async {
-    setState(() => busy = true);
-    try { await operation(); }
-    catch (e) { await handleError(e); }
-    finally {
-      if (mounted) { setState(() => busy = false); }
-      else { await store?.db.close(); }
+    _uiDepth++;if(mounted)setState(()=>busy=true);
+    try{await operation();}catch(error){await handleError(error);}
+    finally{
+      _uiDepth--;
+      if(mounted){setState(()=>busy=_uiDepth>0);if(_uiDepth==0&&worker?.requiresLogin==true)await expireAccount();}
+      else{worker?.dispose();}
     }
   }
 
-  Future<void> synchronize() async {
-    final me = await api.me(token!);
-    if (profile != null && profile!['id'] != me['id']) throw StateError('Аккаунт изменился');
-    profile = me;
-    await vault.remember(token!, me);
-    await openStore();
-    await AccountSync(api, store!).synchronize(token!, write: canWrite);
-    await reload();
-    message = pending == 0 ? 'Всё сохранено и синхронизировано.'
-        : 'Есть изменения, ожидающие отправки. Проверь очередь и конфликты.';
+  Future<void> synchronize({bool manual=false}) async {
+    if(worker==null){
+      final me=await api.me(token!);profile=me;await vault.remember(token!,me);await openStore();
+    }
+    worker!.request(manual:manual);
   }
 
   Future<void> signIn() async {
@@ -154,15 +180,16 @@ class _ServerPageState extends State<ServerPage> {
   }
 
   Future<void> signOut() => perform(() async {
+    final current=worker;current?.removeListener(workerChanged);try{if(current!=null)await current.close();else await store?.db.close();}catch(_){}worker=null;store=null;
     final revoked = await session.logout(token!);
-    await store?.db.close(); store = null;
     token = null; profile = null; items = []; pending = 0; labelCatalog = []; projectCatalog=[]; navigation=0; projectFilter=-1; statusFilter=labelFilter=searchQuery=''; queuedOnly=false;search.clear();
     message = revoked ? 'Выход выполнен. Очередь сохранена для этого аккаунта.'
         : 'Выход выполнен локально. Отзови устройство в профиле сайта. Очередь сохранена.';
   });
 
   Future<void> editStatus(Map<String, Object?> task, String status) => perform(() async {
-    await store!.setStatus(task['local_id'] as String, status);
+    if(!canWrite)throw const ApiFailure(401,'Войди снова для изменения задачи');
+    await store!.setStatus(task['local_id'] as String, status,baseline:task);
     await reload();
     message = 'Статус сохранён на устройстве.';
     if(mounted)setState((){});
@@ -223,10 +250,9 @@ class _ServerPageState extends State<ServerPage> {
     if (!mounted) return;
     final mobile=MediaQuery.sizeOf(context).width<720;
     final fields = mobile
-      ? await Navigator.of(context).push<Map<String,Object?>>(MaterialPageRoute<Map<String,Object?>>(builder:(_)=>TaskEditor(task:task,projects:projects,labels:labels,fullScreen:true)))
-      : await showDialog<Map<String,Object?>>(context:context,builder:(_)=>TaskEditor(task:task,projects:projects,labels:labels));
-    if (fields == null) return;
-    await store!.edit(task['local_id'] as String, fields);
+      ? await Navigator.of(context).push<Map<String,Object?>>(MaterialPageRoute<Map<String,Object?>>(builder:(_)=>TaskEditor(task:task,projects:projects,labels:labels,fullScreen:true,onSave:(fields)=>store!.edit(task['local_id'] as String,fields,baseline:task))))
+      : await showDialog<Map<String,Object?>>(context:context,builder:(_)=>TaskEditor(task:task,projects:projects,labels:labels,onSave:(fields)=>store!.edit(task['local_id'] as String,fields,baseline:task)));
+    if (fields == null||fields.isEmpty) return;
     await reload();
     message = 'Правки сохранены на устройстве.';
     if(mounted)setState((){});
@@ -236,8 +262,8 @@ class _ServerPageState extends State<ServerPage> {
 
   Future<void> openLabels() => perform(() async {
     await showDialog<void>(context: context, barrierDismissible: false, builder: (_) => LabelsDialog(
-      store: store!, canWrite: canWrite,
-      synchronize: () async { await AccountSync(api, store!).synchronize(token!, write: canWrite); },
+      store: store!, canWrite: canWrite,changes:worker,syncMessage:()=>worker?.message??message,
+      synchronize: () async { await synchronize(); },
     ));
     await reload();
   });
@@ -246,8 +272,9 @@ class _ServerPageState extends State<ServerPage> {
   Future<void> openAttachments(Map<String,Object?> task) => perform(() async {
     final mobile=MediaQuery.sizeOf(context).width<720;
     Widget page()=>AttachmentsDialog(store:store!,api:api,token:token!,localId:task['local_id'] as String,
-      taskTitle:task['title'] as String,canWrite:canWrite,fullScreen:mobile,
-      synchronize:() async {await AccountSync(api,store!).synchronize(token!,write:canWrite);});
+      taskTitle:task['title'] as String,canWrite:canWrite,fullScreen:mobile,changes:worker,syncMessage:()=>worker?.message??message,
+      scheduleRefresh:()=>worker?.files(task['local_id'] as String),
+      synchronize:() async {await synchronize();});
     if(mobile) {await Navigator.of(context).push(MaterialPageRoute<void>(builder:(_)=>page()));}
     else {await showDialog<void>(context:context,barrierDismissible:false,builder:(_)=>page());}
     await reload();
@@ -257,8 +284,9 @@ class _ServerPageState extends State<ServerPage> {
     final mobile=MediaQuery.sizeOf(context).width<720;
     Widget page()=>CommentsDialog(store:store!,api:api,token:token!,localId:task['local_id'] as String,
       taskTitle:task['title'] as String,author:(profile?['name']??profile?['email']??'Я').toString(),
-      canWrite:canWrite,fullScreen:mobile,
-      synchronize:() async {await AccountSync(api,store!).synchronize(token!,write:canWrite);});
+      canWrite:canWrite,fullScreen:mobile,changes:worker,syncMessage:()=>worker?.message??message,
+      scheduleRefresh:()=>worker?.comments(task['local_id'] as String),
+      synchronize:() async {await synchronize();});
     if(mobile) {await Navigator.of(context).push(MaterialPageRoute<void>(builder:(_)=>page()));}
     else {await showDialog<void>(context:context,barrierDismissible:false,builder:(_)=>page());}
     await reload();
@@ -274,13 +302,13 @@ class _ServerPageState extends State<ServerPage> {
         case 'files': await openAttachments(current); break;
         case 'resolve': await resolve(current); break;
         case 'checklist': await perform(() async {
-          await store!.edit(current['local_id'] as String,{'checklist':value});await reload();await synchronize();
+          await store!.edit(current['local_id'] as String,{'checklist':value},baseline:current);await reload();await synchronize();
         }); break;
       }
       return store==null?null:await store!.task(current['local_id'] as String);
     }
     Widget page()=>TaskDetailView(initial:task,projects:projectCatalog,labels:labelCatalog,fullScreen:mobile,
-      canWrite:canWrite,action:action,message:()=>message,readProjects:()=>store!.projects(),readLabels:()=>store!.labels());
+      canWrite:canWrite,action:action,message:()=>message,changes:worker,readTask:()=>store?.task(task['local_id'] as String)??Future<Map<String,Object?>?>.value(),readProjects:()=>store!.projects(),readLabels:()=>store!.labels());
     if(mobile) {await Navigator.of(context).push(MaterialPageRoute<void>(builder:(_)=>page()));}
     else {await showDialog<void>(context:context,barrierDismissible:false,builder:(_)=>page());}
     await reload();
@@ -311,14 +339,14 @@ class _ServerPageState extends State<ServerPage> {
   @override
   void dispose() {
     email.dispose(); password.dispose(); title.dispose(); search.dispose();
-    if (!busy) store?.db.close();
+    WidgetsBinding.instance.removeObserver(this);worker?.removeListener(workerChanged);if(worker!=null){worker!.dispose();}else{final database=store?.db;if(database!=null)unawaited(database.close().catchError((Object _){}));}
     super.dispose();
   }
 
   Widget syncStatus()=>Padding(padding:const EdgeInsets.symmetric(horizontal:20,vertical:10),child:Row(children:[
-    if(busy)const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2))
+    if(worker?.running==true)const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2))
     else Icon(pending>0?Icons.cloud_upload_outlined:Icons.cloud_done_outlined,size:18),
-    const SizedBox(width:10),Expanded(child:Tooltip(message:message,child:Text(busy?'Обновляем данные…':message,maxLines:2,overflow:TextOverflow.ellipsis,style:Theme.of(context).textTheme.bodySmall))),
+    const SizedBox(width:10),Expanded(child:Tooltip(message:message,child:Text(worker?.running==true?'Синхронизация в фоне · можно продолжать работу':message,maxLines:2,overflow:TextOverflow.ellipsis,style:Theme.of(context).textTheme.bodySmall))),
     if(pending>0)Padding(padding:const EdgeInsets.only(left:8),child:Text('$pending в очереди',style:Theme.of(context).textTheme.labelSmall)),
   ]));
 
@@ -401,12 +429,12 @@ class _ServerPageState extends State<ServerPage> {
   @override
   Widget build(BuildContext context)=>PopScope(canPop:!busy,child:LayoutBuilder(builder:(context,constraints){
     final wide=constraints.maxWidth>=1000;
-    final authenticated=token!=null&&store!=null;
+    final authenticated=token!=null&&store!=null&&worker!=null;
     Widget content=authenticated?(navigation==0?tasksView():navigation==1?projectsView():settingsView()):token==null?loginView():Center(
       child:Padding(padding:const EdgeInsets.all(24),child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:420),child:Column(
         mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.stretch,children:[
           if(busy)const LinearProgressIndicator(),Text(message,textAlign:TextAlign.center),const SizedBox(height:16),
-          FilledButton(onPressed:busy?null:()=>perform(synchronize),child:const Text('Повторить подключение')),
+          FilledButton(onPressed:busy?null:()=>perform(()=>synchronize(manual:true)),child:const Text('Повторить подключение')),
           TextButton(onPressed:busy?null:signOut,child:const Text('Выйти из аккаунта')),
         ],
       ))),
@@ -414,7 +442,7 @@ class _ServerPageState extends State<ServerPage> {
     if(authenticated)content=Column(children:[syncStatus(),Expanded(child:content)]);
     return Scaffold(
       appBar:AppBar(title:const Text('СовДело'),actions:[
-        if(token!=null)IconButton(tooltip:'Синхронизировать',onPressed:busy?null:()=>perform(synchronize),icon:const Icon(Icons.sync)),
+        if(token!=null)IconButton(tooltip:'Синхронизировать',onPressed:busy?null:()=>perform(()=>synchronize(manual:true)),icon:const Icon(Icons.sync)),
       ]),
       body:Row(children:[
         if(authenticated&&wide)NavigationRail(extended:true,selectedIndex:navigation,onDestinationSelected:(value)=>setState(()=>navigation=value),

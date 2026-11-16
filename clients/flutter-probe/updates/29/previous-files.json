@@ -1,0 +1,14 @@
+{
+  "lib/account_store.dart": "51a19ec839d0ee41e8db1c5fd7ee0ed2977005cfbb39bbbbcd8534ca6b913e70",
+  "lib/account_sync.dart": "2fb7dd00c9b43f1eda8e2c3fadb5be468edb70f092a65fd2c1ef3ab7999ba130",
+  "lib/workspace_api.dart": "48beebc8a5d012495de729167a50a00000889bf4e3eebd6bd0308f99d5163697",
+  "lib/file_transfers.dart": "6215e82d9601e8d4c43bd401f562ac1958ead3dd469efe89dc36884bc3c62b1d",
+  "lib/server_page.dart": "ac62015a3d3fd76181bf06b309251158c250df99c640b2f18edaee0bad4393e7",
+  "lib/task_editor.dart": "5e0bc889e7e16810b8c60da7c2df0fc7d1a1df5cefd0693025d2283a1d0243f9",
+  "lib/task_detail_view.dart": "ccf661976a31ee67564588db1177aa04b3f854034b47066f4ad554d99ae9033a",
+  "lib/comments_dialog.dart": "a85cf2768eeb21db4ada465b06fd13c7207b7fe45210d7448b187277f2785b83",
+  "lib/attachments_dialog.dart": "18108579c04670b6f32e213ebd58fd3eb41e1a322079026058fa43fccb58a93f",
+  "lib/labels_dialog.dart": "a432506e99484da3630450c92c769bb2ff8a331c973e6b4333b194ca3f72516c",
+  "lib/comments_sync.dart": "fa54514daa3079643c4caa1a2bb8e2e0e2994ecd50756d68f85a8adf6d41d550",
+  "lib/attachments_sync.dart": "9ddbe1d30225424d99bd459200f9b19fd229f6f950b32a37c4aa599e080e0357"
+}

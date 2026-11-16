@@ -8,7 +8,8 @@ typedef ApiTransport = Future<Map<String, dynamic>> Function(
 class ApiFailure implements Exception {
   final int status;
   final String message;
-  const ApiFailure(this.status, this.message);
+  final int? retryAfter;
+  const ApiFailure(this.status, this.message,{this.retryAfter});
   @override
   String toString() => message;
 }
@@ -51,7 +52,7 @@ class WorkspaceApi {
         }
         final status = response.statusCode;
         if (status == 401) throw const ApiFailure(401, 'Сессия истекла или токен отозван. Войди снова.');
-        if (status == 429) throw const ApiFailure(429, 'Слишком много запросов. Подожди и повтори.');
+        if (status == 429) throw ApiFailure(429, 'Слишком много запросов. Подожди и повтори.',retryAfter:int.tryParse(response.headers.value('retry-after')??''));
         if (status == 422 && path == 'auth/token') {
           throw const ApiFailure(422, 'Не удалось войти. Проверь email и пароль; также проверь лимит устройств в профиле сайта.');
         }

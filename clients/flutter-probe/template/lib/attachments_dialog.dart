@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -10,9 +11,12 @@ import 'workspace_api.dart';
 class AttachmentsDialog extends StatefulWidget {
   final AccountStore store;final WorkspaceApi api;
   final String token,localId,taskTitle;final bool canWrite;final bool fullScreen;
+  final Listenable? changes;
+  final String Function()? syncMessage;
+  final VoidCallback? scheduleRefresh;
   final Future<void> Function() synchronize;
   const AttachmentsDialog({super.key,required this.store,required this.api,required this.token,
-    required this.localId,required this.taskTitle,required this.canWrite,required this.synchronize,this.fullScreen=false});
+    required this.localId,required this.taskTitle,required this.canWrite,required this.synchronize,this.fullScreen=false,this.changes,this.syncMessage,this.scheduleRefresh});
   @override
   State<AttachmentsDialog> createState()=>_AttachmentsDialogState();
 }
@@ -20,7 +24,7 @@ class _AttachmentsDialogState extends State<AttachmentsDialog> {
   final transport=NativeFileTransfers();
   List<Map<String,Object?>> rows=[];bool busy=true;String message='Открываем сохранённый список файлов…';
   @override
-  void initState(){super.initState();run(() async {rows=await widget.store.attachments(widget.localId);if(mounted)setState((){});await refresh();});}
+  void initState(){super.initState();widget.changes?.addListener(cacheChanged);run(() async {rows=await widget.store.attachments(widget.localId);if(mounted)setState((){});if(widget.scheduleRefresh!=null){widget.scheduleRefresh!();message='Сохранённый список. Обновление выполняется в фоне.';}else{await refresh();}});}
   Future<void> run(Future<void> Function() operation) async {
     setState(()=>busy=true);
     try {await operation();}
@@ -38,7 +42,7 @@ class _AttachmentsDialogState extends State<AttachmentsDialog> {
     final size=await picked.length();
     await AttachmentFiles(widget.store).stage(widget.localId,picked.name,picked.readAsByteStream(),length:size);
     message='Копия сохранена. Отправляем очередь…';if(mounted)setState((){});
-    await widget.synchronize();await refresh();
+    await widget.synchronize();if(widget.scheduleRefresh!=null)widget.scheduleRefresh!();else await refresh();
   });
   Future<void> save(Map<String,Object?> file)=>run(() async {
     message='Проверяем или скачиваем файл…';if(mounted)setState((){});
@@ -55,10 +59,22 @@ class _AttachmentsDialogState extends State<AttachmentsDialog> {
         FilledButton(onPressed:()=>Navigator.pop(context,true),child:const Text('Удалить копию'))],
     ));
     if(yes!=true)return;
-    if(pending)await widget.store.discardAttachment(file['local_id'] as String);
-    else await widget.store.uncacheAttachment(file['local_id'] as String);
-    await AttachmentFiles(widget.store).remove(file['local_path'] as String?);
+    final path=pending?await widget.store.discardAttachment(file['local_id'] as String):await widget.store.uncacheAttachment(file['local_id'] as String);
+    if(path!=null)await AttachmentFiles(widget.store).remove(path);
+    else message='Состояние файла уже изменилось. Локальная очередь сохранена.';
   });
+  @override
+  void dispose(){widget.changes?.removeListener(cacheChanged);super.dispose();}
+  int cacheVersion=0;
+  void cacheChanged(){unawaited(readCache());}
+  Future<void> readCache() async {
+    final version=++cacheVersion;
+    try{
+      final loaded=await widget.store.attachments(widget.localId);
+      if(mounted&&version==cacheVersion)setState((){rows=loaded;if(!busy&&widget.syncMessage!=null)message=widget.syncMessage!();});
+    }catch(_){/* Retain the last displayed cache if closing or a storage read fails. */}
+  }
+
   @override
   Widget build(BuildContext context){
     final dialog=AlertDialog(
@@ -66,7 +82,7 @@ class _AttachmentsDialogState extends State<AttachmentsDialog> {
     content:SizedBox(width:680,child:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.stretch,children:[
       if(busy)const LinearProgressIndicator(),Text(message),
       Wrap(spacing:8,children:[
-        TextButton(onPressed:busy?null:()=>run(() async {await widget.synchronize();await refresh();}),child:const Text('Обновить и отправить очередь')),
+        TextButton(onPressed:busy?null:()=>run(() async {await widget.synchronize();if(widget.scheduleRefresh!=null)widget.scheduleRefresh!();else await refresh();}),child:const Text('Обновить и отправить очередь')),
         FilledButton.icon(onPressed:busy||!widget.canWrite||rows.length>=50?null:add,icon:const Icon(Icons.attach_file),label:const Text('Добавить файл')),
       ]),
       if(rows.isEmpty)const Padding(padding:EdgeInsets.all(16),child:Text('В сохранённом списке пока нет файлов.')),
@@ -76,7 +92,7 @@ class _AttachmentsDialogState extends State<AttachmentsDialog> {
         Wrap(spacing:8,children:[
           TextButton(onPressed:busy?null:()=>save(file),child:const Text('Сохранить как…')),
           if(file['state']=='blocked')TextButton(onPressed:busy||!widget.canWrite?null:()=>run(() async {
-            await widget.store.retryAttachment(file['local_id'] as String);await widget.synchronize();await refresh();
+            await widget.store.retryAttachment(file['local_id'] as String);await widget.synchronize();if(widget.scheduleRefresh!=null)widget.scheduleRefresh!();else await refresh();
           }),child:const Text('Повторить')),
           if(file['local_path']!=null&&(file['state']=='sent'||file['state']=='blocked'))TextButton(onPressed:busy?null:()=>remove(file),child:const Text('Убрать локальную копию')),
         ]),
