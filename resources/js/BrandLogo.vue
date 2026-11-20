@@ -1,0 +1,1 @@
+<template><span class="brand-logo"><svg width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="9" fill="#78dfb2"/><path d="m8 16 5 5L24 10" stroke="#112b1e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><b>СовДело</b></span></template>
