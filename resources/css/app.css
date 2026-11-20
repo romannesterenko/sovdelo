@@ -69,3 +69,8 @@ html,body,#app{height:100%;min-height:0}
 /* Patch 40: completed checklist indicator on task cards */
 .meta .checklist-progress-complete{background:#277b54;color:#effff5;border-radius:5px;padding:2px 5px;font-weight:650}
 .shell.light .meta .checklist-progress-complete{background:#d1f4df;color:#17613d}
+
+/* Patch 41: project badge in the top-right of Kanban cards. */
+.board-task-heading{display:flex;align-items:flex-start;gap:8px;min-width:0}
+.board-task-heading .board-title{flex:1 1 auto;min-width:0;width:auto;overflow-wrap:anywhere}
+.board-task-heading .board-project-tag{flex:0 1 auto;min-width:0;max-width:48%;margin-top:1px;white-space:normal;overflow-wrap:anywhere;text-align:center;line-height:1.35}
