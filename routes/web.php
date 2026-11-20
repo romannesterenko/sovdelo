@@ -66,6 +66,8 @@ Route::middleware(['auth',\App\Http\Middleware\EnsureAccountSession::class])->gr
  Route::get('/labels',[TaskDetailsController::class,'labels']);
  Route::post('/labels',[TaskDetailsController::class,'createLabel']);
  Route::get('/tasks/{task}/details',[TaskDetailsController::class,'show']);
+ Route::put('/tasks/{task}/cover',[TaskDetailsController::class,'cover'])->whereNumber('task');
+ Route::get('/tasks/{task}/attachments/{attachment}/preview',[TaskDetailsController::class,'preview'])->whereNumber('task')->whereNumber('attachment');
  Route::put('/tasks/{task}/labels',[TaskDetailsController::class,'setLabels']);
  Route::post('/tasks/{task}/comments',[TaskDetailsController::class,'comment']);
  Route::patch('/tasks/{task}/comments/{comment}',[TaskDetailsController::class,'editComment']);

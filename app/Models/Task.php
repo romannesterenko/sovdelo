@@ -6,7 +6,15 @@ class Task extends Model {
  public function project(){return $this->belongsTo(Project::class);}
  public function scopeActiveBoard($q){return $q->whereNull('tasks.archived_at')->where(fn($sub)=>$sub->whereNull('project_id')->orWhereHas('project',fn($p)=>$p->whereNull('archived_at')));}
 
- protected $with=['labels'];
+ protected $with=['labels','coverAttachment'];
+ protected $hidden=['coverAttachment'];
+ protected $appends=['cover'];
+ public function coverAttachment(){return $this->belongsTo(TaskAttachment::class,'cover_attachment_id');}
+ public function getCoverAttribute():?array {
+  $file=$this->coverAttachment;
+  if(!$file||!$file->is_image||(int)$file->task_id!==(int)$this->id)return null;
+  return ['id'=>(int)$file->id,'url'=>$file->preview_url,'name'=>$file->name,'width'=>$file->image_width,'height'=>$file->image_height];
+ }
  protected $withCount=['comments','attachments'];
  public function labels(){return $this->belongsToMany(Label::class,'task_label');}
  public function comments(){return $this->hasMany(TaskComment::class);}
@@ -18,5 +26,5 @@ class Task extends Model {
  }
 
  protected $fillable=['user_id','project_id','title','description','status','priority','due_date','planned_date','checklist'];
- protected function casts(): array {return ['version'=>'integer','remind_at'=>'immutable_datetime','checklist'=>'array','user_id'=>'integer','project_id'=>'integer','sort_order'=>'integer','archived_at'=>'datetime'];}
+ protected function casts(): array {return ['cover_attachment_id'=>'integer','cover_disabled'=>'boolean','version'=>'integer','remind_at'=>'immutable_datetime','checklist'=>'array','user_id'=>'integer','project_id'=>'integer','sort_order'=>'integer','archived_at'=>'datetime'];}
 }

@@ -2,6 +2,7 @@
 namespace App\Http\Controllers\Api;
 use App\Models\{Task,TaskAttachment,User};
 use App\Services\ApiData;
+use App\Services\TaskCovers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\{DB,Storage};
 
@@ -16,9 +17,9 @@ class AttachmentsController
   return $disk->download($a->path,$a->name,['Content-Type'=>'application/octet-stream','X-Content-Type-Options'=>'nosniff','Cache-Control'=>'private, no-store','X-File-SHA256'=>$sha]);
  }
  public function upload(Request $r,int $task){
-  $d=$r->validate(['operation_uuid'=>'required|uuid','name'=>'required|string|max:240','sha256'=>'required|regex:/^[a-f0-9]{64}$/','file'=>'required|file|max:10240|mimes:pdf,txt,csv,jpg,jpeg,png,webp,zip,doc,docx,xls,xlsx']);
+  $d=$r->validate(['operation_uuid'=>'required|uuid','name'=>'required|string|max:240','sha256'=>'required|regex:/^[a-f0-9]{64}$/','file'=>'required|file|max:10240|mimes:pdf,txt,csv,jpg,jpeg,png,webp,gif,zip,doc,docx,xls,xlsx']);
   $name=mb_substr(str_replace(array_map('chr',array_merge(range(0,31),[47,92,127])),'_',$d['name']),0,240);
-  abort_unless(in_array(strtolower(pathinfo($name,PATHINFO_EXTENSION)),['pdf','txt','csv','jpg','jpeg','png','webp','zip','doc','docx','xls','xlsx'],true),422,'Тип файла не поддерживается.');
+  abort_unless(in_array(strtolower(pathinfo($name,PATHINFO_EXTENSION)),['pdf','txt','csv','jpg','jpeg','png','webp','gif','zip','doc','docx','xls','xlsx'],true),422,'Тип файла не поддерживается.');
   $file=$r->file('file');$bytes=(int)$file->getSize();abort_if($bytes<1,422,'Пустой файл.');$sha=hash_file('sha256',$file->getRealPath());
   abort_unless(hash_equals($d['sha256'],$sha),422,'Контрольная сумма файла не совпала.');
   $hash=hash('sha256',json_encode(['upload-v1',$task,$name,$bytes,$sha],JSON_THROW_ON_ERROR));$path=null;
@@ -32,7 +33,7 @@ class AttachmentsController
     $total=TaskAttachment::whereIn('task_id',Task::withTrashed()->where('user_id',$uid)->select('id'))->sum('bytes');
     abort_if($total+$bytes>250*1024*1024,422,'Превышен лимит аккаунта: 250 МБ.');
     $path=$file->store('task-files/'.$uid,'local');if(!$path)throw new \RuntimeException('Не удалось сохранить файл.');
-    $a=new TaskAttachment(['task_id'=>$t->id,'name'=>$name,'path'=>$path,'bytes'=>$bytes]);$a->client_uuid=$d['operation_uuid'];$a->sha256=$sha;$a->save();
+    $a=new TaskAttachment(['task_id'=>$t->id,'name'=>$name,'path'=>$path,'bytes'=>$bytes]);$a->client_uuid=$d['operation_uuid'];$a->sha256=$sha;$a->save();app(TaskCovers::class)->uploaded($t,$a);
     $result=['operation_uuid'=>$d['operation_uuid'],'attachment'=>$this->data($a)];
     DB::table('api_requests')->insert(['user_id'=>$uid,'request_key'=>$d['operation_uuid'],'fingerprint'=>$hash,'result'=>json_encode($result,JSON_THROW_ON_ERROR),'status'=>201,'created_at'=>now(),'updated_at'=>now()]);
     return ApiData::response($result,201);
