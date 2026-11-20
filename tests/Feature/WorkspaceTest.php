@@ -471,6 +471,26 @@ class WorkspaceTest extends TestCase {
   $this->account();for($i=0;$i<6;$i++)$this->postJson('/login',['email'=>'one@example.com','password'=>'wrong'])->assertUnprocessable();
   $this->postJson('/login',['email'=>'one@example.com','password'=>'wrong'])->assertStatus(429);
  }
+ public function test_transfer_project_descriptions_round_trip_and_safe_fill():void {
+  $a=$this->account();$p=Project::create(['user_id'=>$a->id,'name'=>'Исходный','description'=>'Цели и этапы проекта']);
+  $d=$this->actingAs($a)->getJson('/transfer/export')->assertOk()->json();
+  $this->assertSame('Цели и этапы проекта',$d['projects'][0]['description']);
+  $b=$this->account('transfer-description@example.com');
+  $r=$this->transferRequest($d);
+  $this->actingAs($b)->postJson('/transfer/preview',$r)->assertOk()->assertJsonPath('summary.project_descriptions',1);
+  $this->postJson('/transfer/import',$r)->assertOk()->assertJsonPath('created_projects',1);
+  $copied=Project::where('user_id',$b->id)->firstOrFail();$this->assertSame('Цели и этапы проекта',$copied->description);
+  $copied->description=null;$copied->save();
+  $this->postJson('/transfer/import',$this->transferRequest($d))->assertOk()->assertJsonPath('updated_project_descriptions',1);
+  $this->assertSame('Цели и этапы проекта',$copied->fresh()->description);
+  $copied->description='Не перезаписывать';$copied->save();
+  $this->postJson('/transfer/import',$this->transferRequest($d))->assertOk()->assertJsonPath('updated_project_descriptions',0);
+  $this->assertSame('Не перезаписывать',$copied->fresh()->description);
+  $d['projects'][0]['description']=str_repeat('а',30001);
+  $this->postJson('/transfer/preview',$this->transferRequest($d))->assertUnprocessable();
+  unset($d['projects'][0]['description']);
+  $this->postJson('/transfer/preview',$this->transferRequest($d))->assertOk();
+ }
  private function transferDocument():array {return ['format'=>'sovdelo.transfer','schema_version'=>1,'exported_at'=>'2026-11-11T12:00:00+00:00','projects'=>[],'tasks'=>[]];}
  private function transferTask(string $title='Из файла'):array {return ['uuid'=>(string)\Illuminate\Support\Str::uuid(),'project_uuid'=>null,'title'=>$title,'description'=>null,'status'=>'todo','priority'=>'normal','due_date'=>null,'planned_date'=>null,'archived_at'=>null,'deleted_at'=>null,'checklist'=>[],'labels'=>[],'comments'=>[],'time'=>[]];}
  private function transferRequest(array $document,string $strategy='skip',?string $key=null):array {$payload=json_encode($document,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR);return ['payload'=>$payload,'strategy'=>$strategy,'fingerprint'=>hash('sha256',$payload),'request_key'=>$key??(string)\Illuminate\Support\Str::uuid()];}
