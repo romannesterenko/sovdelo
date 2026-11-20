@@ -15,9 +15,10 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->statefulApi();
         // Import fingerprints must use the exact bytes of the uploaded JSON.
-        $middleware->trimStrings(except: ['payload']);
+        $middleware->trimStrings(except: ['payload','secret']);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
+        $exceptions->dontFlash(['secret']);
         $exceptions->render(function(\Throwable $e,Request $r){
             if(!$r->is('api/v1','api/v1/*'))return null;
             $details=[];$headers=[];

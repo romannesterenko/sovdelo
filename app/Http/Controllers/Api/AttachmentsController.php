@@ -30,7 +30,8 @@ class AttachmentsController
     $old=DB::table('api_requests')->where('user_id',$uid)->where('request_key',$d['operation_uuid'])->first();
     if($old){abort_unless(hash_equals($old->fingerprint,$hash),409,'UUID уже использован для другого файла.');return ApiData::response(json_decode($old->result,true),$old->status);}
     $t=$this->owned($r,$task);abort_if($t->attachments()->count()>=50,422,'Максимум 50 файлов на задачу.');
-    $total=TaskAttachment::whereIn('task_id',Task::withTrashed()->where('user_id',$uid)->select('id'))->sum('bytes');
+    $projectBytes=\App\Models\ProjectAttachment::whereIn('project_id',\App\Models\Project::where('user_id',$uid)->select('id'))->sum('bytes');
+    $total=$projectBytes+TaskAttachment::whereIn('task_id',Task::withTrashed()->where('user_id',$uid)->select('id'))->sum('bytes');
     abort_if($total+$bytes>250*1024*1024,422,'Превышен лимит аккаунта: 250 МБ.');
     $path=$file->store('task-files/'.$uid,'local');if(!$path)throw new \RuntimeException('Не удалось сохранить файл.');
     $a=new TaskAttachment(['task_id'=>$t->id,'name'=>$name,'path'=>$path,'bytes'=>$bytes]);$a->client_uuid=$d['operation_uuid'];$a->sha256=$sha;$a->save();app(TaskCovers::class)->uploaded($t,$a);

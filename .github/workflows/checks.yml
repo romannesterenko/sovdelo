@@ -79,7 +79,7 @@ jobs:
       - name: Build Vue and validate TypeScript
         run: npm run build
       - name: Laravel tests
-        run: php artisan test --filter=WorkspaceTest
+        run: php artisan test
 
       - name: Package tested commit
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

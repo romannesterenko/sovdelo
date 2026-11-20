@@ -63,6 +63,20 @@ Route::middleware(['auth',\App\Http\Middleware\EnsureAccountSession::class])->gr
  Route::post('/projects/{project}/archive',[TaskLifecycleController::class,'archiveProject']);
  Route::post('/projects/{project}/restore',[TaskLifecycleController::class,'restoreProject']);
 
+ // Project dossier: session-authenticated, deliberately separate from device/agent APIs.
+ $pc=\App\Http\Controllers\ProjectDetailsController::class;
+ Route::get('/projects/{project}/details',[$pc,'show'])->whereNumber('project');
+ Route::patch('/projects/{project}/details',[$pc,'update'])->whereNumber('project');
+ Route::put('/projects/{project}/cover',[$pc,'cover'])->whereNumber('project');
+ Route::post('/projects/{project}/files',[$pc,'upload'])->whereNumber('project');
+ Route::get('/projects/{project}/files/{file}/preview',[$pc,'preview'])->whereNumber('project')->whereNumber('file');
+ Route::get('/projects/{project}/files/{file}',[$pc,'download'])->whereNumber('project')->whereNumber('file');
+ Route::delete('/projects/{project}/files/{file}',[$pc,'deleteFile'])->whereNumber('project')->whereNumber('file');
+ Route::post('/projects/{project}/credentials',[$pc,'addCredential'])->whereNumber('project');
+ Route::patch('/projects/{project}/credentials/{credential}',[$pc,'updateCredential'])->whereNumber('project')->whereNumber('credential');
+ Route::delete('/projects/{project}/credentials/{credential}',[$pc,'deleteCredential'])->whereNumber('project')->whereNumber('credential');
+ Route::post('/projects/{project}/credentials/{credential}/reveal',[$pc,'reveal'])->whereNumber('project')->whereNumber('credential')->middleware('throttle:30,1');
+
  Route::get('/labels',[TaskDetailsController::class,'labels']);
  Route::post('/labels',[TaskDetailsController::class,'createLabel']);
  Route::get('/tasks/{task}/details',[TaskDetailsController::class,'show']);

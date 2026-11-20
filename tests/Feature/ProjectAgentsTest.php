@@ -29,7 +29,7 @@ class ProjectAgentsTest extends TestCase {
   $this->deleteJson('/api/v1/tasks/'.$task->id,[],$this->headers($token))->assertForbidden();
  }
  public function test_regular_device_is_not_an_agent():void {
-  [$owner]=$this->fixture();$token=$owner->createToken('Обычный',['workspace:read','workspace:write']);$token->accessToken->auth_version=$owner->auth_version;$token->accessToken->save();
+  [$owner]=$this->fixture();$owner->refresh();$token=$owner->createToken('Обычный',['workspace:read','workspace:write']);$token->accessToken->auth_version=$owner->auth_version;$token->accessToken->save();
   $this->getJson('/api/v1/agent/context',$this->headers($token->plainTextToken))->assertUnauthorized();
  }
  public function test_claim_report_review_and_owner_acceptance():void {

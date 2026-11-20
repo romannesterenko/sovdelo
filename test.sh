@@ -17,4 +17,4 @@ docker compose -p sovdelo exec -T postgres sh -eu -c '
 APP_ENV=testing APP_CONFIG_CACHE=bootstrap/cache/sovdelo-testing-config.php \
  DB_URL= DB_CONNECTION=pgsql DB_HOST=127.0.0.1 DB_PORT=5433 \
  DB_DATABASE=sovdelo_testing CACHE_STORE=array SESSION_DRIVER=array QUEUE_CONNECTION=sync \
- php artisan test --filter=WorkspaceTest
+ php artisan test
