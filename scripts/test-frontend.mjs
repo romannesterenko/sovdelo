@@ -8,7 +8,7 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const temp=fs.mkdtempSync(path.join(os.tmpdir(),'sovdelo-frontend-'));
 let code=1;
 try {
- for(const moduleName of ['planning','kanban']){
+ for(const moduleName of ['planning','kanban','boardPreferences']){
  const source=fs.readFileSync(path.join(root,`resources/js/${moduleName}.ts`),'utf8');
  const result=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022},reportDiagnostics:true,fileName:moduleName+'.ts'});
  const errors=(result.diagnostics||[]).filter(d=>d.category===ts.DiagnosticCategory.Error);
@@ -17,7 +17,7 @@ try {
  }
  const tests=fs.readdirSync(path.join(root,'tests/Frontend')).filter(n=>n.endsWith('.test.mjs')).map(n=>path.join(root,'tests/Frontend',n));
  if(!tests.length)throw Error('Frontend-тесты не найдены');
- const child=spawnSync(process.execPath,['--test',...tests],{cwd:root,stdio:'inherit',env:{...process.env,SOVDELO_PLANNING_MODULE:pathToFileURL(path.join(temp,'planning.mjs')).href,SOVDELO_KANBAN_MODULE:pathToFileURL(path.join(temp,'kanban.mjs')).href}});
+ const child=spawnSync(process.execPath,['--test',...tests],{cwd:root,stdio:'inherit',env:{...process.env,SOVDELO_PLANNING_MODULE:pathToFileURL(path.join(temp,'planning.mjs')).href,SOVDELO_KANBAN_MODULE:pathToFileURL(path.join(temp,'kanban.mjs')).href,SOVDELO_BOARD_PREFERENCES_MODULE:pathToFileURL(path.join(temp,'boardPreferences.mjs')).href}});
  if(child.error)throw child.error;
  code=child.status??1;
 } catch(e){console.error(e instanceof Error?e.message:e)}
