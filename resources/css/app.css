@@ -58,3 +58,10 @@ html,body,#app{height:100%;min-height:0}
 @media(max-width:600px){.project-overlay{padding:8px}.project-dialog{max-height:calc(100dvh - 16px);width:100%}.project-dialog-header,.project-dialog-content{padding:16px}.project-dialog-footer{padding:10px 16px}.project-cover{height:160px}.project-dialog .two{flex-direction:column;gap:0}.project-dialog .two>*{width:100%}.project-file .actions{width:100%}.project-dialog .task-tabs button{padding:9px 10px}}
 
 .workspace-heading{display:flex;align-items:center;gap:12px}.project-heading-cover{width:64px;height:42px;object-fit:cover;border-radius:7px;flex:none}
+
+/* Patch 37: fixed action footer outside the independently scrolling card list. */
+.flexible-board>.column>.column-add{flex:none;width:100%;display:flex;align-items:center;gap:9px;text-align:left;margin-top:8px;padding:10px 11px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);font:inherit;font-size:12px;cursor:pointer;transition:background .15s,color .15s}
+.flexible-board>.column>.column-add:hover,.flexible-board>.column>.column-add:focus-visible{background:#78dfb21a;color:var(--text);border-color:#78dfb233}
+.flexible-board>.column>.column-add:disabled{opacity:.5;cursor:not-allowed}
+.column-add-icon{font-size:21px;font-weight:400;line-height:14px;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;color:#78dfb2}
+.flexible-board .column-cards .column-tail{min-height:35px;padding:10px 8px}
